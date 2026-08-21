@@ -14,6 +14,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
   protected readonly subject: RDF.Term;
   protected readonly predicate: RDF.Term;
   protected readonly object: RDF.Term;
+  protected readonly graph: RDF.Term;
 
   protected position: number;
 
@@ -23,7 +24,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
     subject: RDF.Term,
     predicate: RDF.Term,
     object: RDF.Term,
-    options: BufferedIteratorOptions,
+    options: BufferedIteratorOptions & { graph?: RDF.Term },
   ) {
     super(options);
     this.cottasDocument = cottasDocument;
@@ -31,6 +32,11 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
     this.subject = subject;
     this.predicate = predicate;
     this.object = object;
+    this.graph = options.graph ?? {
+      termType: 'DefaultGraph',
+      value: '',
+      equals: other => other?.termType === 'DefaultGraph',
+    };
     this.position = 0;
 
     const variables: MetadataVariable[] = [];
@@ -43,8 +49,11 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
     if (object.termType === 'Variable' && !variables.some(variable => variable.variable.equals(object))) {
       variables.push({ variable: object, canBeUndef: false });
     }
+    if (this.graph.termType === 'Variable' && !variables.some(variable => variable.variable.equals(this.graph))) {
+      variables.push({ variable: this.graph, canBeUndef: false });
+    }
 
-    this.cottasDocument.countPattern(subject, predicate, object)
+    this.cottasDocument.countPattern(subject, predicate, object, this.graph)
       .then(({ totalCount, hasExactCount }) => {
         this.setProperty('metadata', {
           state: new MetadataValidationState(),
@@ -65,7 +74,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
       this.subject,
       this.predicate,
       this.object,
-      undefined,
+      this.graph,
       { offset: this.position, limit: count },
     ).then((searchResult: ICottasBindingsResult) => {
       for (const b of searchResult.bindings) {

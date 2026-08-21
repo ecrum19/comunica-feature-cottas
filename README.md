@@ -6,48 +6,71 @@
 
 <p align="center"><strong>Comunica for COTTAS</strong></p>
 
-This monorepo is the development home for querying
-[COTTAS](https://github.com/arenas-guerrero-julian/pycottas) compressed RDF files with
-[Comunica](https://github.com/comunica/comunica).
+This monorepo adds Node.js querying of local [COTTAS](https://github.com/arenas-guerrero-julian/pycottas) files to [Comunica](https://github.com/comunica/comunica). Its structure follows [`comunica-feature-hdt` at `6e5972b`](https://github.com/comunica/comunica-feature-hdt/tree/6e5972b) and its packages align with Comunica `5.3.0`.
 
-> **Scaffold status:** the repository structure, configuration, engine entry points,
-> adapter contract, unit-test harnesses, and benchmark layouts are initialized. The
-> COTTAS reader is intentionally not implemented until the format/runtime spike in
-> [COTTAS_IMPLEMENTATION_PLAN.md](COTTAS_IMPLEMENTATION_PLAN.md) resolves the physical schema,
-> term encoding, and supported DuckDB version.
+## Supported COTTAS files
 
-The layout follows
-[`comunica-feature-hdt` at `6e5972b`](https://github.com/comunica/comunica-feature-hdt/tree/6e5972b)
-and is aligned with Comunica `5.3.0` conventions:
+A source must be one local Apache Parquet file with `VARCHAR` columns named `s`, `p`, and `o`, plus an optional `g` column. Values are N-Triples terms. In a quad table, SQL `NULL` in `g` represents the default graph. This matches the `pycottas` and `cottas-rs` reference implementations.
 
-- `packages/actor-query-source-identify-cottas`: source actor, query source, iterator, and reader-adapter seam;
-- `engines/config-query-sparql-cottas`: Components.js configuration for the actor;
-- `engines/query-sparql-cottas`: Node-only standalone engine and CLI entry points;
-- `performance/benchmark-bsbm-cottas`: staged BSBM benchmark layout;
-- `performance/benchmark-watdiv-cottas`: staged WatDiv benchmark layout.
+The reader uses DuckDB's Node API. Constants, graph restrictions, and repeated-variable equality are pushed into parameterized SQL; result pages are bounded and ordered by Parquet row number. Cardinality metadata is exact.
 
-## Development setup
+URLs, directories, globs, browser execution, updates, and multiple files in one COTTAS source are not supported. SPARQL solution ordering remains unspecified unless the query contains `ORDER BY`.
 
-Use Node.js 22 or newer and Yarn 1.22.22.
+## Installation and command line
+
+Use Node.js 22 or newer.
 
 ```bash
-git clone https://github.com/ecrum19/comunica-feature-cottas.git
-cd comunica-feature-cottas
-yarn install
-yarn run build
-yarn test
-yarn lint
+yarn add @comunica/query-sparql-cottas
+comunica-sparql-cottas cottas@/absolute/path/data.cottas \
+  'SELECT * WHERE { ?s ?p ?o } LIMIT 100'
 ```
 
-The copied integration specs and benchmark layouts are deliberately not enabled in CI
-until deterministic `.cottas` fixtures and a reproducible COTTAS writer are available.
+The dynamic CLI and HTTP endpoint are also available:
 
-## Implementation
+```bash
+comunica-dynamic-sparql-cottas cottas@/absolute/path/data.cottas \
+  'ASK { ?s ?p ?o }'
+comunica-sparql-cottas-http cottas@/absolute/path/data.cottas --port 3000
+```
 
-Start with Phase 0 in [COTTAS_IMPLEMENTATION_PLAN.md](COTTAS_IMPLEMENTATION_PLAN.md). Keep
-format-specific SQL, schema validation, RDF-term conversion, and native resource ownership
-behind `CottasDocument`; the Comunica actor and iterator should depend only on that contract.
+## JavaScript / TypeScript
+
+```javascript
+const { QueryEngine } = require('@comunica/query-sparql-cottas');
+
+const engine = new QueryEngine();
+const bindings = await engine.queryBindings(
+  'SELECT * WHERE { ?s ?p ?o } LIMIT 100',
+  { sources: [{ type: 'cottas', value: '/absolute/path/data.cottas' }] },
+);
+
+for await (const binding of bindings) {
+  console.log(binding.toString());
+}
+```
+
+## Repository layout
+
+- `packages/actor-query-source-identify-cottas`: DuckDB adapter, source actor, buffered iterator, fixtures, and tests.
+- `engines/config-query-sparql-cottas`: Components.js configuration.
+- `engines/query-sparql-cottas`: programmatic engine, static/dynamic CLIs, and HTTP endpoint.
+- `performance/benchmark-bsbm-cottas` and `performance/benchmark-watdiv-cottas`: benchmark runners awaiting reproducible benchmark-scale COTTAS assets.
+
+## Development
+
+```bash
+yarn install
+yarn run build
+yarn run test-ci
+yarn run lint
+yarn run depcheck
+# Or run every repository check above plus benchmark-config validation:
+yarn run verify
+```
+
+See [COTTAS_IMPLEMENTATION_CHECKLIST.md](COTTAS_IMPLEMENTATION_CHECKLIST.md) for task status and [COTTAS_IMPLEMENTATION_CHANGELOG.md](COTTAS_IMPLEMENTATION_CHANGELOG.md) for architecture and verification details.
 
 ## License
 
-This project follows Comunica's MIT licensing; see [LICENSE.txt](LICENSE.txt).
+This project follows Comunica's MIT licensing; see [LICENSE.txt](LICENSE.txt). The provenance and Apache-2.0 license of the `cottas-rs` test fixture are recorded beside that fixture.

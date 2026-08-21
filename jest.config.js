@@ -1,8 +1,6 @@
 module.exports = {
   transform: {
-    '^.+\\.ts$': [ 'ts-jest', {
-      isolatedModules: true,
-    }],
+    '^.+\\.ts$': 'ts-jest',
   },
   testRegex: '/test/.*-test.ts$',
   moduleFileExtensions: [
@@ -15,6 +13,7 @@ module.exports = {
     '/node_modules/',
     '/mocks/',
     'index.js',
+    '/engines/query-sparql-cottas/engine-default.js',
     '/packages/actor-query-source-identify-cottas/test/MockedCottasDocument.ts',
   ],
   testEnvironment: 'node',

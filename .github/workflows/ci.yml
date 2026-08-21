@@ -43,8 +43,8 @@ jobs:
           github-token: ${{ secrets.github_token }}
           flag-name: run-${{ matrix.node-version }}
           parallel: true
-      - name: Run integration tests
-        # Enable after Phase 5 adds a deterministic COTTAS fixture and manifest.
+      - name: Run external RDF manifest tests
+        # Local real-COTTAS integration tests run above. Enable this only after a hosted manifest is published.
         if: ${{ false }}
         run: npx lerna run integration --concurrency 1
 

@@ -9,7 +9,4 @@ yarn add @comunica/config-query-sparql-cottas
 
 Use `config/config-default.json` as the base configuration for a COTTAS-enabled engine.
 Generated Components.js files must be produced with `yarn run build:components`; they should
-not be edited manually.
-
-The configuration is staged, but end-to-end COTTAS queries remain unavailable until the
-`CottasDocument` runtime adapter is implemented.
+not be edited manually. The configured actor uses a default page buffer of 128 rows.

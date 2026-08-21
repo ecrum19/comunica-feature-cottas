@@ -7,10 +7,8 @@ import type {
 } from '@comunica/types';
 import { Algebra, isKnownOperation, AlgebraFactory } from '@comunica/utils-algebra';
 import type { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { MetadataValidationState } from '@comunica/utils-metadata';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import { ArrayIterator } from 'asynciterator';
 import type { CottasDocument } from './CottasDocument';
 import { CottasIterator } from './CottasIterator';
 
@@ -42,21 +40,24 @@ export class QuerySourceCottas implements IQuerySource {
     this.dataFactory = dataFactory;
     this.bindingsFactory = bindingsFactory;
     this.maxBufferSize = maxBufferSize;
+    const subject = this.dataFactory.variable('s');
+    const predicate = this.dataFactory.variable('p');
+    const object = this.dataFactory.variable('o');
+    const graph = this.dataFactory.variable('g');
     this.selectorShape = {
       type: 'operation',
       operation: {
         operationType: 'pattern',
         pattern: AF.createPattern(
-          this.dataFactory.variable('s'),
-          this.dataFactory.variable('p'),
-          this.dataFactory.variable('o'),
+          subject,
+          predicate,
+          object,
+          this.cottasDocument.hasGraphColumn ? graph : undefined,
         ),
       },
-      variablesOptional: [
-        this.dataFactory.variable('s'),
-        this.dataFactory.variable('p'),
-        this.dataFactory.variable('o'),
-      ],
+      variablesOptional: this.cottasDocument.hasGraphColumn ?
+          [ subject, predicate, object, graph ] :
+          [ subject, predicate, object ],
     };
   }
 
@@ -73,27 +74,14 @@ export class QuerySourceCottas implements IQuerySource {
       throw new Error(`Attempted to pass non-pattern operation '${operation.type}' to QuerySourceCottas`);
     }
 
-    let it: AsyncIterator<RDF.Bindings>;
-    if (operation.graph.termType === 'NamedNode') {
-      it = new ArrayIterator<RDF.Bindings>([], { autoStart: false });
-      it.setProperty('metadata', {
-        state: new MetadataValidationState(),
-        cardinality: { type: 'exact', value: 0 },
-        variables: [],
-      });
-    } else {
-      // Create an iterator over the COTTAS document
-      it = new CottasIterator(
-        this.cottasDocument,
-        this.bindingsFactory,
-        operation.subject,
-        operation.predicate,
-        operation.object,
-        { autoStart: false, maxBufferSize: this.maxBufferSize },
-      );
-    }
-
-    return it;
+    return new CottasIterator(
+      this.cottasDocument,
+      this.bindingsFactory,
+      operation.subject,
+      operation.predicate,
+      operation.object,
+      { autoStart: false, maxBufferSize: this.maxBufferSize, graph: operation.graph },
+    );
   }
 
   public queryQuads(

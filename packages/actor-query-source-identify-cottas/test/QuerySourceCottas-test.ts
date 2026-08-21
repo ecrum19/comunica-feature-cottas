@@ -119,8 +119,29 @@ describe('QuerySourceCottas', () => {
           .toEqual({
             cardinality: { type: 'exact', value: 0 },
             state: expect.any(MetadataValidationState),
-            variables: [],
+            variables: [
+              { variable: DF.variable('s'), canBeUndef: false },
+              { variable: DF.variable('o'), canBeUndef: false },
+            ],
           });
+      });
+
+      it('should return and bind named graphs from a quad table', async() => {
+        const quadDocument = new MockedCottasDocument([
+          DF.quad(DF.namedNode('s1'), DF.namedNode('p'), DF.namedNode('o1'), DF.namedNode('g1')),
+          DF.quad(DF.namedNode('s2'), DF.namedNode('p'), DF.namedNode('o2'), DF.namedNode('g2')),
+        ]);
+        const quadSource = new QuerySourceCottas('quads', quadDocument, DF, BF, 128);
+        const data = quadSource.queryBindings(AF.createPattern(
+          DF.variable('s'),
+          DF.namedNode('p'),
+          DF.variable('o'),
+          DF.variable('g'),
+        ), ctx);
+        await expect(data).toEqualBindingsStream([
+          BF.fromRecord({ s: DF.namedNode('s1'), o: DF.namedNode('o1'), g: DF.namedNode('g1') }),
+          BF.fromRecord({ s: DF.namedNode('s2'), o: DF.namedNode('o2'), g: DF.namedNode('g2') }),
+        ]);
       });
     });
   });

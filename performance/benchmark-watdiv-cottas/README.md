@@ -10,3 +10,9 @@ you can run `npm run performance:ci` instead,
 which is what the CI will run as well for continuous performance measurements.
 
 Continuous performance results are tracked on https://github.com/comunica/comunica-performance-results.
+
+## Required COTTAS asset
+
+Benchmark execution is intentionally opt-in until the COTTAS tooling project supplies a reproducible benchmark-scale writer policy. Generate or fetch the WatDiv RDF input with JBR, convert it with the agreed `pycottas` or `cottas-rs` workflow, and place the result at `generated/dataset.cottas`. The pre-performance check stops immediately with this path when the asset is absent.
+
+Record the writer version, source dataset checksum, selected COTTAS index/order, Parquet compression settings, and output checksum with every benchmark run. Once this workflow is fixed and automated, enable the performance CI job described in `COTTAS_IMPLEMENTATION_CHECKLIST.md`.

@@ -8,6 +8,7 @@
   "@id": "urn:jbr:benchmark-watdiv-cottas:combination_1",
   "@type": "ExperimentWatDiv",
   "datasetScale": 10,
+  "generateHdt": false,
   "queryCount": 5,
   "queryRecurrence": 1,
   "endpointUrl": "http://localhost:3001/sparql",

@@ -14,4 +14,4 @@ HttpServiceSparqlEndpoint.runArgsInProcess(
   (code) => {
     process.exit(code);
   },
-).catch(error => process.stderr.write(`${error.message}/n`));
+).catch(error => process.stderr.write(`${error.message}\n`));

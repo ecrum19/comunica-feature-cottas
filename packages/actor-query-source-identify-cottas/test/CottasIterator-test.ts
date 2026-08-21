@@ -280,7 +280,7 @@ describe('CottasIterator', () => {
     });
   });
 
-  it('should expose the metadata property for non-exact count', async() => {
+  it('should expose exact metadata for a single match', async() => {
     const it = new CottasIterator(
       cottasDocument,
       BF,
@@ -292,8 +292,25 @@ describe('CottasIterator', () => {
     const metadata = await new Promise(resolve => it.getProperty('metadata', resolve));
     expect(metadata).toEqual({
       state: new MetadataValidationState(),
-      cardinality: { type: 'estimate', value: 1 },
+      cardinality: { type: 'exact', value: 1 },
       variables: [],
+    });
+  });
+
+  it('should expose estimated metadata when the adapter only has an estimate', async() => {
+    const estimatedDocument = new MockedCottasDocument([
+      quad('s1', 'p1', 'o1'),
+    ], false);
+    const it = new CottasIterator(
+      estimatedDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      { autoStart: false },
+    );
+    await expect(new Promise(resolve => it.getProperty('metadata', resolve))).resolves.toMatchObject({
+      cardinality: { type: 'estimate', value: 1 },
     });
   });
 });

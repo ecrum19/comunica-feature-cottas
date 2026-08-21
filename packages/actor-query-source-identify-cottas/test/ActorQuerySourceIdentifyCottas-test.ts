@@ -117,12 +117,12 @@ describe('ActorQuerySourceIdentifyCottas', () => {
         expect(ret.querySource.context).toBe(contextSource);
       });
 
-      it('should expose the Phase 0 adapter error until a reader is implemented', async() => {
+      it('should expose an actionable error for a missing source', async() => {
         openDocumentSpy.mockRestore();
         await expect(actor.run({
           querySourceUnidentified: { type: 'cottas', value: 'path/' },
           context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
-        })).rejects.toThrow('The COTTAS runtime adapter is not implemented yet');
+        })).rejects.toThrow('Unable to access COTTAS file');
       });
 
       it('should get the same source', async() => {
