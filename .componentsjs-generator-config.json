@@ -1,0 +1,11 @@
+{
+  "source": "lib",
+  "ignorePackagePaths": [
+    "engines/query-sparql-cottas"
+  ],
+  "ignoreComponents": [
+    "CottasIterator",
+    "QuerySourceCottas"
+  ],
+  "modulePrefix": {}
+}

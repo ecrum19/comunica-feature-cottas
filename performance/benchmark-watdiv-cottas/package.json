@@ -1,0 +1,21 @@
+{
+  "name": "benchmark-watdiv-cottas",
+  "version": "5.3.0",
+  "private": true,
+  "scripts": {
+    "jbr": "cross-env NODE_OPTIONS=--max-old-space-size=8192 jbr",
+    "validate": "jbr validate",
+    "fetch-assets": "curl -L https://github.com/comunica/comunica-performance-assets/raw/master/watdiv-10.zip?download= > watdiv-10.zip && unzip watdiv-10.zip -d generated/ && rm watdiv-10.zip",
+    "preperformance": "node scripts/check-cottas-asset.js",
+    "performance": "docker pull comunica/query-sparql-cottas:latest && jbr prepare && jbr run && psbr tex query combinations/combination_*/output --svg --logY --overrideCombinationLabels Current,Previous",
+    "preperformance:ci": "node scripts/check-cottas-asset.js",
+    "performance:ci": "npm run fetch-assets && jbr prepare -c 0 && jbr run -c 0"
+  },
+  "dependencies": {
+    "@jbr-experiment/watdiv": "^6.0.0",
+    "@jbr-hook/cli": "^6.0.0",
+    "@jbr-hook/sparql-endpoint-comunica": "^6.0.0",
+    "cross-env": "^10.0.0",
+    "jbr": "^6.0.0"
+  }
+}

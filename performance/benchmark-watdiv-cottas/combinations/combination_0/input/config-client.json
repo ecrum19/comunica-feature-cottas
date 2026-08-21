@@ -1,0 +1,8 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/config-query-sparql-cottas/^3.0.0/components/context.jsonld"
+  ],
+  "import": [
+    "ccqsc:config/config-default.json"
+  ]
+}

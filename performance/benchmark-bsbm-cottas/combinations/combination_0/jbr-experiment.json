@@ -1,0 +1,16 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/jbr/^6.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@jbr-experiment/bsbm/^6.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@jbr-hook/sparql-endpoint-comunica/^6.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@jbr-hook/cli/^6.0.0/components/context.jsonld"
+  ],
+  "@id": "urn:jbr:benchmark-bsbm-cottas:combination_0",
+  "@type": "ExperimentBsbm",
+  "productCount": 1000,
+  "endpointUrl": "http://host.docker.internal:3001/sparql",
+  "endpointUrlExternal": "http://localhost:3001/sparql",
+  "warmupRuns": 5,
+  "runs": 10,
+  "hookSparqlEndpoint": { "@id": "urn:jbr:benchmark-bsbm-cottas:hookSparqlEndpoint", "@type": "HookCli", "entrypoint": ["node", "../../engines/query-sparql-cottas/bin/http.js", "cottas@generated/dataset.cottas", "-p", "3001"], "statsFilePath": "output/stats.csv" }
+}
