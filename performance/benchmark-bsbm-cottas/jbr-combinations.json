@@ -7,7 +7,7 @@
   "commonGenerated": true,
   "factors": {
     "hookSparqlEndpoint": [
-      "{\"@id\": \"urn:jbr:benchmark-bsbm-cottas:hookSparqlEndpoint\",\"@type\": \"HookCli\",\"entrypoint\": [  \"node\",  \"../../engines/query-sparql-cottas/bin/http.js\",  \"cottas@generated/dataset.cottas\",  \"-p\",  \"3001\"],\"statsFilePath\": \"output/stats.csv\"  }",
+      "{\"@id\": \"urn:jbr:benchmark-bsbm-cottas:hookSparqlEndpoint\",\"@type\": \"HookCli\",\"entrypoint\": [  \"node\",  \"../../engines/query-sparql-cottas/bin/http.js\",  \"cottas@generated/dataset.cottas\",  \"-p\",  \"3001\",  \"-t\",  \"500\"],\"statsFilePath\": \"output/stats.csv\"  }",
       "{\"@id\": \"urn:jbr:benchmark-bsbm-cottas:hookSparqlEndpoint\",  \"@type\": \"HookSparqlEndpointComunica\",  \"dockerfileClient\": \"input/dockerfiles/Dockerfile-client\",  \"resourceConstraints\": {\"@type\": \"StaticDockerResourceConstraints\",\"cpu_percentage\": 100  },  \"configClient\": \"input/config-client.json\",  \"contextClient\": \"input/context-client.json\",  \"additionalBinds\": [\"../../generated/dataset.cottas:/tmp/dataset.cottas:ro\"],  \"clientPort\": 3001,  \"clientLogLevel\": \"info\",  \"maxMemory\": 8192}"
     ]
   }

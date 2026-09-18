@@ -268,6 +268,7 @@ the lever — see below — the duplicated `COUNT(*)` probes are (finding D3).
   from **30.0 s to 13.0 s (2.3×)** with identical results, serving 9,109 of 11,294 probes from cache.
   A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per
   pattern is safe; it needs a bounded LRU (one query produced 2,185 distinct patterns).
+- ✅ **Fixed:** BSBM's endpoint hook now passes `-t 500`, matching WatDiv, in both `benchmark-bsbm-cottas` and `benchmark-bsbm-cottas-10k`.
 - 🔴 **The 120-minute CI timeout will not hold.** WatDiv-10 alone took 30.4 min for the head engine.
   On a pull request the job runs base *and* head sequentially, so that benchmark is already ~61 min
   of the 120-minute budget before WatDiv-100 or BSBM-10k are considered. WatDiv-100 is ten times the
@@ -335,7 +336,7 @@ than by parsing, but it is the one part of the change worth a second reviewer's 
 4. C2, D4, D6 are small.
 5. If genome-scale reads matter more later, the next step beyond `pageSize` is a real DuckDB streaming cursor per iterator — that would also fix the deep-`OFFSET` case, which `pageSize` does not help.
 6. Give BSBM's endpoint hook the same explicit `-t` as WatDiv's; without it one slow query aborts the whole benchmark.
-7. Cache `countPattern` per pattern behind a bounded LRU (D3). Measured 2.3x on WatDiv C2, and it is the only lever that moves the benchmark runtime — page size does not.
+7. Cache `countPattern` per pattern behind a bounded LRU (D3). Measured 2.3x on WatDiv C2, and it is the only lever that moves the benchmark runtime — page size does not. **Deliberately deferred**; tracked under "Future optimizations" in `COTTAS_IMPLEMENTATION_CHECKLIST.md`.
 8. Raise the benchmark CI timeout before enabling the matrix on pull requests.
 
 ---

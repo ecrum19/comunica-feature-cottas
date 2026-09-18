@@ -63,6 +63,14 @@ This checklist turns `COTTAS_IMPLEMENTATION_PLAN.md` into verifiable work items.
 
 See [performance/README.md](performance/README.md) for the converter policy and validation status, and `COTTAS_REVIEW_AND_E2E_REPORT.md` for the measurements taken so far.
 
+## Future optimizations
+
+Deliberately not implemented; recorded here so the measurements are not lost.
+
+- [ ] Cache `CottasDocument.countPattern` per distinct pattern behind a bounded LRU. Every `CottasIterator` issues one exact `COUNT(*)` from its constructor, and bind joins create one iterator per binding, so patterns are re-counted many times over. Profiling WatDiv C2 (30 s, 0 solutions) recorded **11,294 `countPattern` calls against 338 paged reads for 1,589 rows**; memoizing them took the query to **13.0 s (2.3x)** with identical results and 9,109 of 11,294 probes served from cache. A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per pattern is sound. One query produced 2,185 distinct patterns, so the cache needs a size bound.
+- [ ] Use more than one DuckDB connection per document. All operations are serialized on a single connection, so concurrent triple patterns in a join cannot overlap.
+- [ ] Replace LIMIT/OFFSET paging with a DuckDB streaming cursor per iterator. `pageSize` already removed the quadratic full-scan cost, but a deep explicit `OFFSET` still has to skip every preceding row.
+
 ## Phase 7 — Documentation and changelog
 
 - [x] Document installation, supported inputs, API, CLI, HTTP usage, limitations, and troubleshooting.
