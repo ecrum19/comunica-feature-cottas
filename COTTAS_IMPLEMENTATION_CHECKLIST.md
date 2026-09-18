@@ -61,7 +61,7 @@ This checklist turns `COTTAS_IMPLEMENTATION_PLAN.md` into verifiable work items.
 - [x] Verify conversion on the WatDiv 10 and BSBM 1k inputs and record file provenance.
 - [ ] Complete all four timing runs, large-dataset conversion, and PR/base comparisons on a VM or CI.
 
-See [performance/README.md](performance/README.md) for the converter policy, validation status, and VM commands. Local benchmark execution was stopped at the maintainer's request; full performance results are not yet verified.
+See [performance/README.md](performance/README.md) for the converter policy and validation status, and `COTTAS_REVIEW_AND_E2E_REPORT.md` for the measurements taken so far.
 
 ## Phase 7 — Documentation and changelog
 

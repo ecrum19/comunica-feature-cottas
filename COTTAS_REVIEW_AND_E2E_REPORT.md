@@ -188,6 +188,65 @@ The `scaling.cjs` "effect of page size" table still reads ~5.2 s at every `maxBu
 
 ---
 
+## Benchmark workflow — VM validation (branch `benchmark-workflow`)
+
+Run on **vcf-bench-1** and **vcf-bench-2** (each 8 cores, 31 GB, Ubuntu, Docker 29.7.2), Node 26.9.0,
+from a clean checkout of commit `7782bbd` in `~/cottas-bench-test`. Existing VM data untouched.
+
+### Works
+
+| Step | Result |
+|---|---|
+| `yarn install --frozen-lockfile --ignore-engines` | ✅ 59 s |
+| `yarn run test-performance` | ✅ 9/9 script tests + 4 JBR config validations |
+| WatDiv-10 `performance:prepare` | ✅ **47 s** — checksum-verified asset fetch, JBR prepare, Docker image build, pycottas conversion |
+| WatDiv-10 `performance:run` | ✅ **30.4 min**, exit 0, 0 query errors, `check-results.js` passed |
+| BSBM-1k `performance:ci` (vcf-bench-2) | ▶ running at time of writing |
+
+Conversion output is sound: 152 MB `dataset.nt` → **4.76 MB `dataset.cottas`** (32× smaller) for
+1,079,876 triples, with `dataset.cottas.json` recording pycottas 1.1.0 / duckdb 1.4.3 / pyoxigraph
+0.3.18 versions, the SPO+ZSTD-22+Parquet-v2 policy, the triple count, and both SHA-256 digests.
+
+### Measurements — WatDiv scale 10, 100 query instances × (1 warmup + 3 replications)
+
+20 metrics, **sum of medians 89.0 s**. Two templates are 78% of that:
+
+| Template | Median | Rows returned |
+|---|---:|---:|
+| C3 | 40.1 s | 244,010 |
+| C2 | 30.0 s | 0 |
+| C1 | 5.8 s | 0 |
+| F2/F3 | ~1.2 s | 3 / 4 |
+| everything else | < 1 s | small |
+
+**Seven of twenty templates (C1, C2, F1, S3, S4, S5, S7) return zero rows on every instantiation**,
+with `error=false`. I checked this against DuckDB rather than assuming: for S3, 162 subjects are in
+`ProductCategory8` but none carries all of `caption` + `hasGenre` + `publisher`, so **0 is the
+correct answer**. The WatDiv instantiations are simply selective — not an engine defect. It does
+mean a large part of the suite measures empty-result latency rather than result throughput.
+
+### Issues found
+
+- 🔴 **The 120-minute CI timeout will not hold.** WatDiv-10 alone took 30.4 min for the head engine.
+  On a pull request the job runs base *and* head sequentially, so that benchmark is already ~61 min
+  of the 120-minute budget before WatDiv-100 or BSBM-10k are considered. WatDiv-100 is ten times the
+  data. Either raise `timeout-minutes`, cut `queryRunnerReplication`, or split the matrix further.
+- 🟠 **`libatomic1` is an undocumented prerequisite.** Node 26 will not start on a stock Ubuntu image
+  without it (`error while loading shared libraries: libatomic.so.1`). Needs
+  `sudo apt-get install -y libatomic1`; `ubuntu-latest` on GitHub Actions already has it, so this
+  only bites on a VM. Worth a line wherever the Node requirement is stated.
+- 🟡 **`performance:run` is not idempotent against a stale endpoint.** Port 3001 must be free; a
+  leftover endpoint from an interrupted run makes the next one measure the wrong engine silently.
+  A pre-flight port check in `performance:run` would be cheap insurance.
+
+### Not yet validated
+
+WatDiv-100 and BSBM-10k (the large-dataset conversion path, and the main memory/disk risk), and the
+PR/base comparison path including `summarize-results.js --compare` against real artifacts. The
+unit tests cover the comparison arithmetic and the 150% threshold, but not a real two-checkout run.
+
+---
+
 ## Suggested priority
 
 1. ~~**D1** — paging~~ ✅ **done** (see "Fix applied"). 17× on a 959k-triple scan; HG005 `LIMIT 10000` went from a 5-minute timeout to 14.9 s.
@@ -195,6 +254,7 @@ The `scaling.cjs` "effect of page size" table still reads ~5.2 s at every `maxBu
 3. Add a **> 128-row fixture** to the unit suite. The fix added three page-ramp tests against the mock, but there is still no *real* multi-page Parquet fixture in the repo.
 4. C2, D4, D6 are small.
 5. If genome-scale reads matter more later, the next step beyond `pageSize` is a real DuckDB streaming cursor per iterator — that would also fix the deep-`OFFSET` case, which `pageSize` does not help.
+6. Raise the benchmark CI timeout before enabling the matrix on pull requests (see the benchmark section).
 
 ---
 

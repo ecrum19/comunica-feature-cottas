@@ -9,30 +9,6 @@ The benchmark matrix follows [`comunica-feature-hdt` at `ea0eed69`](https://gith
 | `benchmark-bsbm-cottas` | BSBM 1,000 products |
 | `benchmark-bsbm-cottas-10k` | BSBM 10,000 products |
 
-## Run on a VM
-
-Use a Linux VM with Node.js 26, Yarn 1.22, Docker, and `unzip`. The larger datasets need several GB of memory and disk space during conversion. No Python installation or manually supplied COTTAS files are needed: the converter runs in Docker. Keep port 3001 free and run the benchmarks sequentially on an otherwise idle VM.
-
-```bash
-yarn install --frozen-lockfile --ignore-engines
-yarn run verify
-
-for benchmark in watdiv-cottas watdiv-cottas-100 bsbm-cottas bsbm-cottas-10k; do
-  yarn workspace "benchmark-$benchmark" performance:ci || break
-done
-```
-
-Each `performance:ci` command prepares its inputs, converts them to COTTAS, runs the current engine, and checks for missing measurements or query failures. It exits unsuccessfully if any query failed, even if JBR itself exits successfully. Results and endpoint logs are under `benchmark-*/combinations/combination_0/output/`.
-
-To separate preparation from measurements:
-
-```bash
-yarn workspace benchmark-watdiv-cottas performance:prepare
-yarn workspace benchmark-watdiv-cottas performance:run
-```
-
-`performance` runs the optional current/published-release Docker comparison. This additionally requires a published `comunica/query-sparql-cottas:latest` image. CI uses the locally built engine and does not need that image.
-
 ## Automatic file preparation
 
 BSBM uses JBR's `vcity/bsbm:v1.0` generator, just as HDT does, to produce `generated/dataset.nt` and `generated/td_data/`. WatDiv downloads the same scale-10/100 archives from `comunica-performance-assets`, pinned to commit `8b63d56f87576c3878368567d1c9ef79c2b889ee` and checked against their SHA-256 digests. Only the N-Triples and queries are extracted; the archived HDT files are not used.
@@ -55,4 +31,6 @@ Comparisons support fork PRs without write permissions and do not post PR commen
 
 ## Verification status
 
-The converter was exercised with a 20,003-triple fixture, including a full multi-page engine scan, and with the upstream WatDiv scale-10 (1,079,876 triples) and BSBM 1k (374,911 triples) inputs. The first local WatDiv run exposed the HTTP-client issue described above. Local benchmarking was then stopped at the maintainer's request. Full timing runs, large-dataset conversion, and base/head comparisons still need validation on the VM or GitHub Actions; configuration and unit-test success do not establish performance results.
+The converter and the full WatDiv scale-10 matrix have been run end to end; see
+`COTTAS_REVIEW_AND_E2E_REPORT.md` for the measurements and the outstanding items. WatDiv scale 100,
+BSBM 10,000 products, and the PR/base comparison path have not been measured yet.
