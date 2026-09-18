@@ -55,7 +55,7 @@ for await (const binding of bindings) {
 - `packages/actor-query-source-identify-cottas`: DuckDB adapter, source actor, buffered iterator, fixtures, and tests.
 - `engines/config-query-sparql-cottas`: Components.js configuration.
 - `engines/query-sparql-cottas`: programmatic engine, static/dynamic CLIs, and HTTP endpoint.
-- `performance/benchmark-bsbm-cottas` and `performance/benchmark-watdiv-cottas`: benchmark runners awaiting reproducible benchmark-scale COTTAS assets.
+- `performance/benchmark-*`: BSBM 1k/10k and WatDiv 10/100 benchmarks with automatic COTTAS generation and PR/base comparisons; see [the benchmark guide](performance/README.md).
 
 ## Development
 
@@ -65,7 +65,7 @@ yarn run build
 yarn run test-ci
 yarn run lint
 yarn run depcheck
-# Or run every repository check above plus benchmark-config validation:
+# Or run all checks above, benchmark-config/result-check tests, and docs:
 yarn run verify
 ```
 

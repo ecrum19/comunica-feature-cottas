@@ -5,10 +5,10 @@
   "scripts": {
     "jbr": "cross-env NODE_OPTIONS=--max-old-space-size=8192 jbr",
     "validate": "jbr validate",
-    "preperformance": "node scripts/check-cottas-asset.js",
-    "performance": "docker pull comunica/query-sparql-cottas:latest && jbr prepare && jbr run && psbr csv bsbm combinations/combination_*/output && psbr tex query combinations/combination_*/output --svg --logY --overrideCombinationLabels Current,Previous",
-    "preperformance:ci": "node scripts/check-cottas-asset.js",
-    "performance:ci": "jbr prepare -c 0 && jbr run -c 0 && psbr csv bsbm combinations/combination_0/output"
+    "performance": "docker pull comunica/query-sparql-cottas:latest && yarn run performance:prepare && jbr prepare -c 1 && jbr run && psbr csv bsbm combinations/combination_*/output && node ../scripts/check-results.js combinations/combination_0/output combinations/combination_1/output && psbr tex query combinations/combination_*/output --svg --logY --overrideCombinationLabels Current,Previous",
+    "performance:ci": "yarn run performance:prepare && yarn run performance:run",
+    "performance:prepare": "jbr prepare -c 0 && node ../scripts/convert-cottas.js",
+    "performance:run": "jbr run -c 0 && psbr csv bsbm combinations/combination_0/output && node ../scripts/check-results.js combinations/combination_0/output"
   },
   "dependencies": {
     "@jbr-experiment/bsbm": "^6.0.0",

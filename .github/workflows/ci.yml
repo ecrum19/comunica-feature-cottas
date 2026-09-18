@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         node-version:
@@ -76,6 +77,8 @@ jobs:
         run: yarn install --frozen-lockfile --ignore-engines
       - name: Run linter
         run: yarn run lint
+      - name: Validate benchmark configurations and result checks
+        run: yarn run test-performance
 
   docker:
     needs:
@@ -108,37 +111,105 @@ jobs:
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
 
   performance:
-    # Enable after Phase 6 provides reproducible COTTAS benchmark assets.
-    if: ${{ false }}
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
         benchmark:
           - watdiv-cottas
+          - watdiv-cottas-100
           - bsbm-cottas
+          - bsbm-cottas-10k
     needs:
       - test
       - lint
+    env:
+      BENCHMARK_BASE: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          path: head
+      - name: Check out the base commit of the pull request
+        if: env.BENCHMARK_BASE == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - name: Use the same benchmark harness for both engines
+        if: env.BENCHMARK_BASE == 'true'
+        # The base may predate these benchmarks or their COTTAS preparation scripts.
+        run: |
+          cp -R head/performance/. base/performance/
+          node <<'NODE'
+          const fs = require('node:fs');
+          const base = JSON.parse(fs.readFileSync('base/package.json', 'utf8'));
+          const head = JSON.parse(fs.readFileSync('head/package.json', 'utf8'));
+          const dependency = '**/sparql-benchmark-runner/fetch-sparql-endpoint';
+          base.resolutions = { ...base.resolutions, [dependency]: head.resolutions[dependency] };
+          fs.writeFileSync('base/package.json', JSON.stringify(base, null, 2) + '\n');
+          NODE
       - name: Use Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 26.x
       - name: Install dependencies
-        run: yarn install
+        run: yarn install --frozen-lockfile --ignore-engines
+        working-directory: head
+      - name: Install dependencies of the base commit
+        if: env.BENCHMARK_BASE == 'true'
+        # Preserve its lockfile while allowing the pinned benchmark-client fix above.
+        run: yarn install --ignore-engines
+        working-directory: base
+      - name: Prepare RDF inputs, queries, and COTTAS files
+        run: yarn run performance:prepare
+        working-directory: head/performance/benchmark-${{ matrix.benchmark }}
+      - name: Share the prepared inputs with the base commit
+        if: env.BENCHMARK_BASE == 'true'
+        run: cp -R head/performance/benchmark-${{ matrix.benchmark }}/generated/. base/performance/benchmark-${{ matrix.benchmark }}/generated/
+      - name: Prepare the base benchmark runner
+        if: env.BENCHMARK_BASE == 'true'
+        # JBR creates the runner log directories and reuses the shared RDF inputs.
+        run: yarn run jbr prepare -c 0
+        working-directory: base/performance/benchmark-${{ matrix.benchmark }}
+      - name: Run benchmarks of the base commit
+        if: env.BENCHMARK_BASE == 'true'
+        run: yarn run performance:run
+        working-directory: base/performance/benchmark-${{ matrix.benchmark }}
+      - name: Remove containers left behind by the base commit benchmarks
+        if: env.BENCHMARK_BASE == 'true'
+        run: docker ps -aq | xargs -r docker rm -f
       - name: Run benchmarks
-        run: cd performance/benchmark-${{ matrix.benchmark }}/ && yarn run performance:ci
+        run: yarn run performance:run
+        working-directory: head/performance/benchmark-${{ matrix.benchmark }}
+      - name: Record COTTAS provenance with the results
+        if: always()
+        run: |
+          for checkout in head base; do
+            benchmark="$checkout/performance/benchmark-${{ matrix.benchmark }}"
+            if [ -f "$benchmark/generated/dataset.cottas.json" ]; then
+              cp "$benchmark/generated/dataset.cottas.json" "$benchmark/combinations/combination_0/output/"
+            fi
+          done
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: performance-benchmark-${{ matrix.benchmark }}
-          path: performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
+          path: head/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
+      - uses: actions/upload-artifact@v7
+        if: always() && env.BENCHMARK_BASE == 'true'
+        with:
+          name: performance-benchmark-base-${{ matrix.benchmark }}
+          path: base/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
 
   performance-consolidate:
     needs:
       - performance
     runs-on: ubuntu-latest
+    env:
+      # Historical publishing uses the existing PAT only; comparisons require no write permissions.
+      BENCHMARK_PUBLISH_ENABLED: ${{ secrets.PAT != '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -146,24 +217,32 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 26.x
+      - name: Install result-processing dependencies
+        run: yarn install --frozen-lockfile --ignore-engines --ignore-scripts
       - uses: actions/download-artifact@v8
         with:
-          name: performance-benchmark-watdiv-cottas
-          path: performance/benchmark-watdiv-cottas/combinations/combination_0/output/
-      - uses: actions/download-artifact@v8
+          pattern: performance-benchmark-*
+          path: artifacts
+      - name: Summarize benchmarks
+        if: github.event_name != 'pull_request'
+        run: node performance/scripts/summarize-results.js artifacts
+      - name: Compare pull request benchmarks against the base commit
+        if: github.event_name == 'pull_request'
+        run: node performance/scripts/summarize-results.js artifacts --compare
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: performance-benchmark-bsbm-cottas
-          path: performance/benchmark-bsbm-cottas/combinations/combination_0/output/
-      - name: Process benchmark detailed results
-        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-cottas/combinations/combination_0/output/ performance/benchmark-bsbm-cottas/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-COTTAS,BSBM-COTTAS --total false --detailed true --name ghbench-detail.json
-      - name: Process benchmark total results
-        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-cottas/combinations/combination_0/output/ performance/benchmark-bsbm-cottas/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-COTTAS,BSBM-COTTAS --total true --detailed false --name ghbench-total.json
-      - name: Determine benchmark detailed results target directory name
-        run: echo "BENCHMARK_DATA_DIR_PATH_DETAIL=comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail" >> $GITHUB_ENV
-      - name: Determine benchmarks total results target directory name
-        run: echo "BENCHMARK_DATA_DIR_PATH_TOTAL=comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total" >> $GITHUB_ENV
+          name: performance-reports
+          path: |
+            ghbench-*.json
+            benchmark-summary.md
+      - name: Determine benchmark results target directories
+        run: |
+          echo "BENCHMARK_DATA_DIR_PATH_DETAIL=comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail" >> "$GITHUB_ENV"
+          echo "BENCHMARK_DATA_DIR_PATH_TOTAL=comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total" >> "$GITHUB_ENV"
       - name: Finalize benchmarks detailed results
-        if: startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next')
+        if: env.BENCHMARK_PUBLISH_ENABLED == 'true' && github.repository == 'comunica/comunica-feature-cottas' && (startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next'))
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Benchmarks detailed results
@@ -178,7 +257,7 @@ jobs:
       - name: Cleanup benchmark-action data
         run: rm -rf ./benchmark-data-repository
       - name: Finalize benchmarks total results
-        if: startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next')
+        if: env.BENCHMARK_PUBLISH_ENABLED == 'true' && github.repository == 'comunica/comunica-feature-cottas' && (startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next'))
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Benchmarks total results
@@ -195,12 +274,6 @@ jobs:
           gh-repository: 'github.com/comunica/comunica-performance-results'
           gh-pages-branch: 'master'
           benchmark-data-dir-path: ${{ env.BENCHMARK_DATA_DIR_PATH_TOTAL }}
-      - name: Prepare comment on commit with link to performance results
-        run: echo -e "Performance benchmarks succeeded! 🚀\n\n\[[Summarized results](https://comunica.github.io/comunica-performance-results/comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total/)\] \[[Detailed results](https://comunica.github.io/comunica-performance-results/comunica-feature-cottas/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail/)\]" > ./commit-comment-body.txt
-      - name: Comment on commit with link to performance results
-        uses: peter-evans/commit-comment@v4
-        with:
-          body-path: ./commit-comment-body.txt
 
   docs:
     runs-on: ubuntu-latest

@@ -1,5 +1,14 @@
 # COTTAS Querying Implementation Changelog
 
+## 2026-09-18 — Automatic benchmark preparation and PR comparisons
+
+- Followed the HDT workflow changes for independent matrix failures, WatDiv 10/100, BSBM 1k/10k, and comparisons against the PR base commit.
+- Added pinned pycottas conversion after the same JBR/WatDiv RDF preparation used by HDT, with input/output checksums and writer settings recorded beside each COTTAS file.
+- Shared benchmark inputs and harnesses across base/head runs, fixed the published-engine COTTAS mount, and added query-error checks and a 150% total-time regression threshold.
+- Pinned the benchmark HTTP client to the upstream release that removes incompatible manual Content-Length headers; added mocked-client and CSV-report tests.
+- Kept workflow permissions and docs deployment unchanged. Comparisons use Actions summaries and artifacts; historical publication requires the existing canonical-repository PAT.
+- Build, 71 unit/integration tests with 100% coverage, lint, dependency checks, nine benchmark tooling tests, four configuration validations, and docs generation pass. Converted the small WatDiv and BSBM inputs successfully. Full timing runs and larger conversions remain for the VM after local benchmarking was stopped at the maintainer's request; see [the benchmark guide](performance/README.md).
+
 ## 2026-08-21 — Initial querying implementation
 
 ### Format and runtime decisions
