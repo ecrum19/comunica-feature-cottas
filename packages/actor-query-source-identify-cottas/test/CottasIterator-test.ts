@@ -298,6 +298,68 @@ describe('CottasIterator', () => {
     ]);
   });
 
+  it('should fall back to a default graph term when no graph is given', () => {
+    const iterator = new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      { autoStart: false },
+    );
+    const graph = (<any> iterator).graph;
+    expect(graph.termType).toBe('DefaultGraph');
+    expect(graph.value).toBe('');
+    expect(graph.equals(DF.defaultGraph())).toBe(true);
+    expect(graph.equals(DF.namedNode('urn:g'))).toBe(false);
+    expect(graph.equals(undefined)).toBe(false);
+  });
+
+  it('should forward the union default graph flag to the document', async() => {
+    const seen: (boolean | undefined)[] = [];
+    const searchBindings = cottasDocument.searchBindings.bind(cottasDocument);
+    jest.spyOn(cottasDocument, 'searchBindings').mockImplementation((...args: any[]) => {
+      seen.push(args[5].unionDefaultGraph);
+      return searchBindings(...args);
+    });
+    const countPattern = jest.spyOn(cottasDocument, 'countPattern');
+    const iterator = new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      { unionDefaultGraph: true },
+    );
+    await arrayifyStream(iterator);
+    expect(seen.every(flag => flag === true)).toBe(true);
+    expect(countPattern).toHaveBeenCalledWith(
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      expect.anything(),
+      { unionDefaultGraph: true },
+    );
+  });
+
+  it('should default the union default graph flag to false', async() => {
+    const seen: (boolean | undefined)[] = [];
+    const searchBindings = cottasDocument.searchBindings.bind(cottasDocument);
+    jest.spyOn(cottasDocument, 'searchBindings').mockImplementation((...args: any[]) => {
+      seen.push(args[5].unionDefaultGraph);
+      return searchBindings(...args);
+    });
+    await arrayifyStream(new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      {},
+    ));
+    expect(seen.every(flag => flag === false)).toBe(true);
+  });
+
   it('should not return anything when the document is closed', async() => {
     cottasDocument.close();
     await expect(new CottasIterator(

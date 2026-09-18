@@ -12,11 +12,21 @@ import { Parser, Writer } from 'n3';
 const COTTAS_COLUMNS = new Set([ 's', 'p', 'o', 'g' ]);
 const REQUIRED_COLUMNS = [ 's', 'p', 'o' ];
 const TERM_PREFIX = '<urn:comunica:cottas:subject> <urn:comunica:cottas:predicate> ';
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
 /** Cardinality information returned by a COTTAS pattern scan. */
 export interface ICottasCountResult {
   totalCount: number;
   hasExactCount: boolean;
+}
+
+/** Graph-matching options shared by the COTTAS read operations. */
+export interface ICottasGraphOptions {
+  /**
+   * Whether the default graph is the union of all graphs, as set by
+   * Comunica's `KeysQueryOperation.unionDefaultGraph` context entry.
+   */
+  unionDefaultGraph?: boolean;
 }
 
 /** A bounded page of COTTAS bindings. */
@@ -34,6 +44,7 @@ export interface CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph?: RDF.Term,
+    options?: ICottasGraphOptions,
   ) => Promise<ICottasCountResult>;
 
   searchBindings: (
@@ -42,7 +53,7 @@ export interface CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph: RDF.Term | undefined,
-    options: { offset: number; limit: number },
+    options: ICottasGraphOptions & { offset: number; limit: number },
   ) => Promise<ICottasBindingsResult>;
 
   close: () => Promise<void>;
@@ -97,9 +108,10 @@ class DuckDBCottasDocument implements CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph: RDF.Term = this.dataFactory.defaultGraph(),
+    options: ICottasGraphOptions = {},
   ): Promise<ICottasCountResult> {
     return this.enqueue(async() => {
-      const pattern = this.patternSql(subject, predicate, object, graph);
+      const pattern = this.patternSql(subject, predicate, object, graph, options);
       if (pattern.impossible) {
         return { totalCount: 0, hasExactCount: true };
       }
@@ -127,14 +139,14 @@ class DuckDBCottasDocument implements CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph: RDF.Term = this.dataFactory.defaultGraph(),
-    options: { offset: number; limit: number },
+    options: ICottasGraphOptions & { offset: number; limit: number },
   ): Promise<ICottasBindingsResult> {
     if (!Number.isSafeInteger(options.offset) || options.offset < 0 ||
       !Number.isSafeInteger(options.limit) || options.limit <= 0) {
       throw new TypeError('COTTAS page offset must be non-negative and its limit must be positive.');
     }
     return this.enqueue(async() => {
-      const pattern = this.patternSql(subject, predicate, object, graph);
+      const pattern = this.patternSql(subject, predicate, object, graph, options);
       if (pattern.impossible) {
         return { bindings: []};
       }
@@ -235,17 +247,63 @@ class DuckDBCottasDocument implements CottasDocument {
     }
   }
 
+  /**
+   * List every COTTAS encoding that denotes `term`.
+   *
+   * COTTAS cells hold N-Triples strings, and one RDF term has more than one legal encoding:
+   * N3 escapes astral characters that files usually store raw, and RDF 1.1 makes a simple literal
+   * the same term as an `xsd:string`-typed one. Comparing against a single serialization would
+   * silently drop solutions from files that use another spelling.
+   */
+  private termEncodings(term: RDF.Term): string[] {
+    const serialized = this.serializeTerm(term);
+    const unescaped = unescapeUnicode(serialized);
+    const encodings = unescaped === serialized ? [ serialized ] : [ serialized, unescaped ];
+    if (term.termType === 'Literal' && !term.language && term.datatype.value === XSD_STRING) {
+      return [ ...encodings, ...encodings.map(encoding => `${encoding}^^<${XSD_STRING}>`) ];
+    }
+    return encodings;
+  }
+
+  /** Build a condition matching any encoding of `term`, pushed down into DuckDB. */
+  private termCondition(column: string, term: RDF.Term, addValue: (value: string) => string): string {
+    const encodings = this.termEncodings(term);
+    const language = term.termType === 'Literal' ? term.language : '';
+    // The guard also rules out a base direction such as `@en--ltr`, where the tag is not the
+    // final segment and slicing it off by length would cut into the direction instead.
+    if (language && encodings.every(encoding => encoding.toLowerCase().endsWith(`@${language.toLowerCase()}`))) {
+      // Language tags compare case-insensitively. The prefix pins the lexical form exactly,
+      // so only the tag is left free to differ in case.
+      const clauses = encodings.map((encoding) => {
+        const lexical = addValue(encoding.slice(0, encoding.length - language.length));
+        const folded = addValue(encoding.toLowerCase());
+        return `(starts_with(${column}, ${lexical}) AND lower(${column}) = ${folded})`;
+      });
+      return `(${clauses.join(' OR ')})`;
+    }
+    return encodings.length === 1 ?
+        `${column} = ${addValue(encodings[0])}` :
+        `${column} IN (${encodings.map(addValue).join(', ')})`;
+  }
+
   private patternSql(
     subject: RDF.Term,
     predicate: RDF.Term,
     object: RDF.Term,
     graph: RDF.Term,
+    options: ICottasGraphOptions,
   ): IPatternSql {
     const conditions: string[] = [];
     const values: Record<string, string> = {};
     const variables = new Map<string, string>();
     let impossible = false;
     let parameter = 0;
+
+    const addValue = (value: string): string => {
+      const parameterName = `term${parameter++}`;
+      values[parameterName] = value;
+      return `$${parameterName}`;
+    };
 
     const addTerm = (column: string, term: RDF.Term, isGraph: boolean): void => {
       if (term.termType === 'Variable') {
@@ -254,7 +312,10 @@ class DuckDBCottasDocument implements CottasDocument {
             impossible = true;
             return;
           }
-          conditions.push('g IS NOT NULL');
+          // Graph variables skip the default graph, unless it is the union of all graphs.
+          if (!options.unionDefaultGraph) {
+            conditions.push('g IS NOT NULL');
+          }
         }
         const existingColumn = variables.get(term.value);
         if (existingColumn) {
@@ -265,7 +326,8 @@ class DuckDBCottasDocument implements CottasDocument {
         return;
       }
       if (isGraph && term.termType === 'DefaultGraph') {
-        if (this.hasGraphColumn) {
+        // Under union default graph semantics the default graph holds every graph's triples.
+        if (this.hasGraphColumn && !options.unionDefaultGraph) {
           conditions.push('g IS NULL');
         }
         return;
@@ -274,9 +336,7 @@ class DuckDBCottasDocument implements CottasDocument {
         impossible = true;
         return;
       }
-      const parameterName = `term${parameter++}`;
-      values[parameterName] = this.serializeTerm(term);
-      conditions.push(`${column} = $${parameterName}`);
+      conditions.push(this.termCondition(column, term, addValue));
     };
 
     addTerm('s', subject, false);
@@ -367,6 +427,20 @@ async function validateLocalPath(inputPath: string): Promise<string> {
     throw new Error(`COTTAS source '${cottasPath}' must be a regular file.`);
   }
   return cottasPath;
+}
+
+/**
+ * Decode the `\\uXXXX` and `\\UXXXXXXXX` escapes N3 writes for astral and control characters.
+ *
+ * Escapes are consumed left to right, so an escaped backslash is copied verbatim and never
+ * mistaken for the start of a character escape.
+ */
+function unescapeUnicode(value: string): string {
+  return value.replaceAll(
+    /\\(?:U([\da-f]{8})|u([\da-f]{4})|(.))/gisu,
+    (match, long: string | undefined, short: string | undefined) =>
+      (long ?? short) === undefined ? match : String.fromCodePoint(Number.parseInt(long ?? short!, 16)),
+  );
 }
 
 function errorMessage(error: unknown): string {

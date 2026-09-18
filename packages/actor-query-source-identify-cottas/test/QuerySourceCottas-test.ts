@@ -1,3 +1,4 @@
+import { KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
 import { AlgebraFactory } from '@comunica/utils-algebra';
@@ -125,6 +126,28 @@ describe('QuerySourceCottas', () => {
               { variable: DF.variable('o'), canBeUndef: false },
             ],
           });
+      });
+
+      it('should read the default graph as the union of all graphs from the context', async() => {
+        const quadDocument = new MockedCottasDocument([
+          DF.quad(DF.namedNode('s1'), DF.namedNode('p'), DF.namedNode('o1')),
+          DF.quad(DF.namedNode('s2'), DF.namedNode('p'), DF.namedNode('o2'), DF.namedNode('g2')),
+        ]);
+        const quadSource = new QuerySourceCottas('quads', quadDocument, DF, BF, 128, 8192);
+        const pattern = AF.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o'));
+
+        // Without the context entry only the default graph is visible.
+        await expect(quadSource.queryBindings(pattern, ctx)).toEqualBindingsStream([
+          BF.fromRecord({ s: DF.namedNode('s1'), o: DF.namedNode('o1') }),
+        ]);
+
+        await expect(quadSource.queryBindings(
+          pattern,
+          new ActionContext({ [KeysQueryOperation.unionDefaultGraph.name]: true }),
+        )).toEqualBindingsStream([
+          BF.fromRecord({ s: DF.namedNode('s1'), o: DF.namedNode('o1') }),
+          BF.fromRecord({ s: DF.namedNode('s2'), o: DF.namedNode('o2') }),
+        ]);
       });
 
       it('should return and bind named graphs from a quad table', async() => {

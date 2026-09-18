@@ -1,3 +1,4 @@
+import { KeysQueryOperation } from '@comunica/context-entries';
 import type {
   BindingsStream,
   ComunicaDataFactory,
@@ -72,7 +73,7 @@ export class QuerySourceCottas implements IQuerySource {
     return this.selectorShape;
   }
 
-  public queryBindings(operation: Algebra.Operation, _context: IActionContext): BindingsStream {
+  public queryBindings(operation: Algebra.Operation, context: IActionContext): BindingsStream {
     if (!isKnownOperation(operation, Algebra.Types.PATTERN)) {
       throw new Error(`Attempted to pass non-pattern operation '${operation.type}' to QuerySourceCottas`);
     }
@@ -88,6 +89,7 @@ export class QuerySourceCottas implements IQuerySource {
         maxBufferSize: this.maxBufferSize,
         pageSize: this.pageSize,
         graph: operation.graph,
+        unionDefaultGraph: Boolean(context.get(KeysQueryOperation.unionDefaultGraph)),
       },
     );
   }

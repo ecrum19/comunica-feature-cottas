@@ -3,6 +3,7 @@ import type {
   CottasDocument,
   ICottasBindingsResult,
   ICottasCountResult,
+  ICottasGraphOptions,
 } from '../lib/CottasDocument';
 
 export class MockedCottasDocument implements CottasDocument {
@@ -25,6 +26,7 @@ export class MockedCottasDocument implements CottasDocument {
     object: RDF.Term,
     triple: RDF.BaseQuad,
     graph?: RDF.Term,
+    unionDefaultGraph = false,
   ): boolean {
     const values = new Map<string, RDF.Term>();
     const pairs: [RDF.Term, RDF.Term][] = [
@@ -32,16 +34,16 @@ export class MockedCottasDocument implements CottasDocument {
       [ predicate, triple.predicate ],
       [ object, triple.object ],
     ];
-    if (graph) {
-      if (graph.termType === 'Variable') {
-        if (triple.graph.termType === 'DefaultGraph') {
-          return false;
-        }
-        pairs.push([ graph, triple.graph ]);
-      } else if (!graph.equals(triple.graph)) {
+    if (!graph || graph.termType === 'DefaultGraph') {
+      if (!unionDefaultGraph && triple.graph.termType !== 'DefaultGraph') {
         return false;
       }
-    } else if (triple.graph.termType !== 'DefaultGraph') {
+    } else if (graph.termType === 'Variable') {
+      if (!unionDefaultGraph && triple.graph.termType === 'DefaultGraph') {
+        return false;
+      }
+      pairs.push([ graph, triple.graph ]);
+    } else if (!graph.equals(triple.graph)) {
       return false;
     }
     for (const [ patternTerm, value ] of pairs) {
@@ -64,7 +66,7 @@ export class MockedCottasDocument implements CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph: RDF.Term | undefined,
-    options: { offset: number; limit: number },
+    options: ICottasGraphOptions & { offset: number; limit: number },
   ): Promise<ICottasBindingsResult> {
     if (this.error) {
       throw this.error;
@@ -74,7 +76,14 @@ export class MockedCottasDocument implements CottasDocument {
     let i = 0;
     const bindings: RDF.Bindings[] = [];
     for (const triple of this.triples) {
-      if (MockedCottasDocument.tripleMatches(subject, predicate, object, triple, graph)) {
+      if (MockedCottasDocument.tripleMatches(
+        subject,
+        predicate,
+        object,
+        triple,
+        graph,
+        options.unionDefaultGraph,
+      )) {
         if (i >= offset && i < offset + limit) {
           const entries: [RDF.Variable, RDF.Term][] = [];
           const addEntry = (variable: RDF.Variable, value: RDF.Term): void => {
@@ -107,13 +116,21 @@ export class MockedCottasDocument implements CottasDocument {
     predicate: RDF.Term,
     object: RDF.Term,
     graph?: RDF.Term,
+    options: ICottasGraphOptions = {},
   ): Promise<ICottasCountResult> {
     if (this.error) {
       throw this.error;
     }
     let i = 0;
     for (const triple of this.triples) {
-      if (MockedCottasDocument.tripleMatches(subject, predicate, object, triple, graph)) {
+      if (MockedCottasDocument.tripleMatches(
+        subject,
+        predicate,
+        object,
+        triple,
+        graph,
+        options.unionDefaultGraph,
+      )) {
         i++;
       }
     }

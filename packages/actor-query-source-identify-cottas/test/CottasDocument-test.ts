@@ -20,6 +20,7 @@ describe('CottasDocument', () => {
   let invalidTypePath: string;
   let invalidTermPath: string;
   let nullTermPath: string;
+  let encodingsPath: string;
 
   beforeAll(async() => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'comunica-cottas-test-'));
@@ -30,6 +31,7 @@ describe('CottasDocument', () => {
     invalidTypePath = join(temporaryDirectory, 'invalid-type.cottas');
     invalidTermPath = join(temporaryDirectory, 'invalid-term.cottas');
     nullTermPath = join(temporaryDirectory, 'null-term.cottas');
+    encodingsPath = join(temporaryDirectory, 'encodings.cottas');
 
     await createParquet(triplePath, 's VARCHAR, p VARCHAR, o VARCHAR', [
       [ '<urn:s1>', '<urn:p>', '"hello"@en' ],
@@ -57,6 +59,19 @@ describe('CottasDocument', () => {
     ]);
     await createParquet(nullTermPath, 's VARCHAR, p VARCHAR, o VARCHAR', [
       [ null, '<urn:p>', '<urn:o>' ],
+    ]);
+    // The same RDF term has more than one legal N-Triples encoding.
+    await createParquet(encodingsPath, 's VARCHAR, p VARCHAR, o VARCHAR', [
+      [ '<urn:typed>', '<urn:p>', '"plain"^^<http://www.w3.org/2001/XMLSchema#string>' ],
+      [ '<urn:simple>', '<urn:p>', '"plain"' ],
+      [ '<urn:upper-tag>', '<urn:lang>', '"hi"@EN-GB' ],
+      [ '<urn:lower-tag>', '<urn:lang>', '"hi"@en-gb' ],
+      [ '<urn:upper-lexical>', '<urn:lang>', '"HI"@en-gb' ],
+      [ '<urn:raw-astral>', '<urn:astral>', '"a \u{1F600}"' ],
+      [ '<urn:escaped-astral>', '<urn:astral>', '"a \\U0001f600"' ],
+      [ '<urn:literal-backslash>', '<urn:astral>', '"a \\\\U0001f600"' ],
+      [ '<urn:raw-control>', '<urn:control>', `"x${String.fromCodePoint(1)}"` ],
+      [ '<urn:escaped-control>', '<urn:control>', '"x\\u0001"' ],
     ]);
   });
 
@@ -104,6 +119,151 @@ describe('CottasDocument', () => {
       DF.namedNode('http://www.w3.org/2001/XMLSchema#integer'),
     ));
     expect(result.bindings[4].get(DF.variable('o'))).toEqual(DF.literal('line\n"quote'));
+    await document.close();
+  });
+
+  it('matches simple and xsd:string-typed encodings of the same literal', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    const pattern: [RDF.Term, RDF.Term, RDF.Term, RDF.Term] = [
+      DF.variable('s'),
+      DF.namedNode('urn:p'),
+      DF.literal('plain'),
+      DF.defaultGraph(),
+    ];
+    await expect(document.countPattern(...pattern))
+      .resolves.toEqual({ totalCount: 2, hasExactCount: true });
+    const { bindings } = await document.searchBindings(BF, ...pattern, { offset: 0, limit: 10 });
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value).sort())
+      .toEqual([ 'urn:simple', 'urn:typed' ]);
+    await document.close();
+  });
+
+  it('matches an explicitly xsd:string-typed constant against both encodings', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    await expect(document.countPattern(
+      DF.variable('s'),
+      DF.namedNode('urn:p'),
+      DF.literal('plain', DF.namedNode('http://www.w3.org/2001/XMLSchema#string')),
+    )).resolves.toEqual({ totalCount: 2, hasExactCount: true });
+    await document.close();
+  });
+
+  it('compares language tags case-insensitively', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    for (const tag of [ 'en-gb', 'EN-GB', 'en-GB' ]) {
+      const { bindings } = await document.searchBindings(
+        BF,
+        DF.variable('s'),
+        DF.namedNode('urn:lang'),
+        DF.literal('hi', tag),
+        DF.defaultGraph(),
+        { offset: 0, limit: 10 },
+      );
+      expect(bindings.map(binding => binding.get(DF.variable('s'))!.value).sort())
+        .toEqual([ 'urn:lower-tag', 'urn:upper-tag' ]);
+    }
+    await document.close();
+  });
+
+  it('keeps the lexical form case-sensitive while matching language tags', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    const { bindings } = await document.searchBindings(
+      BF,
+      DF.variable('s'),
+      DF.namedNode('urn:lang'),
+      DF.literal('HI', 'en-gb'),
+      DF.defaultGraph(),
+      { offset: 0, limit: 10 },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value)).toEqual([ 'urn:upper-lexical' ]);
+    await document.close();
+  });
+
+  it('matches raw and escaped encodings of astral characters', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    // N3 serializes astral characters as \U0001f600; COTTAS files usually store them raw.
+    const { bindings } = await document.searchBindings(
+      BF,
+      DF.variable('s'),
+      DF.namedNode('urn:astral'),
+      DF.literal('a \u{1F600}'),
+      DF.defaultGraph(),
+      { offset: 0, limit: 10 },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value).sort())
+      .toEqual([ 'urn:escaped-astral', 'urn:raw-astral' ]);
+    await document.close();
+  });
+
+  it('matches raw and escaped encodings of control characters', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    // N3 serializes control characters with the short \u0001 escape.
+    const { bindings } = await document.searchBindings(
+      BF,
+      DF.variable('s'),
+      DF.namedNode('urn:control'),
+      DF.literal(`x${String.fromCodePoint(1)}`),
+      DF.defaultGraph(),
+      { offset: 0, limit: 10 },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value).sort())
+      .toEqual([ 'urn:escaped-control', 'urn:raw-control' ]);
+    await document.close();
+  });
+
+  it('does not mistake an escaped backslash for a character escape', async() => {
+    const document = await openCottasDocument(encodingsPath, DF);
+    const { bindings } = await document.searchBindings(
+      BF,
+      DF.variable('s'),
+      DF.namedNode('urn:astral'),
+      // A literal whose lexical form really is a backslash followed by "U0001f600".
+      DF.literal('a \\U0001f600'),
+      DF.defaultGraph(),
+      { offset: 0, limit: 10 },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value)).toEqual([ 'urn:literal-backslash' ]);
+    await document.close();
+  });
+
+  it('treats the default graph as the union of all graphs when asked', async() => {
+    const document = await openCottasDocument(quadPath, DF);
+    const allVariables: [RDF.Term, RDF.Term, RDF.Term] = [
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+    ];
+    await expect(document.countPattern(...allVariables, DF.defaultGraph(), { unionDefaultGraph: true }))
+      .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+    const { bindings } = await document.searchBindings(
+      BF,
+      ...allVariables,
+      DF.defaultGraph(),
+      { offset: 0, limit: 10, unionDefaultGraph: true },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('s'))!.value)).toEqual([
+      'urn:default',
+      'urn:named',
+      'urn:blank-graph',
+    ]);
+    await document.close();
+  });
+
+  it('lets a graph variable range over the default graph under union semantics', async() => {
+    const document = await openCottasDocument(quadPath, DF);
+    const { bindings } = await document.searchBindings(
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      DF.variable('g'),
+      { offset: 0, limit: 10, unionDefaultGraph: true },
+    );
+    expect(bindings.map(binding => binding.get(DF.variable('g'))!.termType)).toEqual([
+      'DefaultGraph',
+      'NamedNode',
+      'BlankNode',
+    ]);
     await document.close();
   });
 

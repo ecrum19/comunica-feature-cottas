@@ -14,10 +14,12 @@ describe('QueryEngine', () => {
   let engine: QueryEngine;
   let temporaryDirectory: string;
   let quadFixture: string;
+  let encodingFixture: string;
 
   beforeAll(async() => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'comunica-cottas-engine-test-'));
     quadFixture = join(temporaryDirectory, 'quads.cottas');
+    encodingFixture = join(temporaryDirectory, 'encodings.cottas');
     const instance = await DuckDBInstance.create(':memory:');
     const connection = await instance.connect();
     try {
@@ -29,6 +31,14 @@ describe('QueryEngine', () => {
           ('<urn:same>', '<urn:same>', '<urn:o>', '<urn:g>')
       `);
       await connection.run('COPY data TO $path (FORMAT PARQUET)', { path: quadFixture });
+      await connection.run('CREATE TABLE encodings (s VARCHAR, p VARCHAR, o VARCHAR)');
+      await connection.run(`
+        INSERT INTO encodings VALUES
+          ('<urn:typed>', '<urn:p>', '"plain"^^<http://www.w3.org/2001/XMLSchema#string>'),
+          ('<urn:simple>', '<urn:p>', '"plain"'),
+          ('<urn:upper-tag>', '<urn:lang>', '"hi"@EN-GB')
+      `);
+      await connection.run('COPY encodings TO $path (FORMAT PARQUET)', { path: encodingFixture });
     } finally {
       connection.closeSync();
       instance.closeSync();
@@ -110,5 +120,31 @@ describe('QueryEngine', () => {
     const repeatedRows = await repeatedResult.toArray();
     expect(repeatedRows).toHaveLength(1);
     expect(repeatedRows[0].get('term')?.value).toBe('urn:same');
+  });
+
+  it('matches literals stored in any of their legal N-Triples encodings', async() => {
+    const source = { sources: [{ type: 'cottas', value: encodingFixture }]};
+
+    // A simple literal and an xsd:string-typed literal denote the same RDF term.
+    const plain = await engine.queryBindings('SELECT ?s WHERE { ?s <urn:p> "plain" } ORDER BY ?s', source);
+    await expect(plain.toArray()).resolves.toHaveLength(2);
+
+    // RDF 1.1 compares language tags case-insensitively.
+    const language = await engine.queryBindings('SELECT ?s WHERE { ?s <urn:lang> "hi"@en-GB }', source);
+    const rows = await language.toArray();
+    expect(rows.map(row => row.get('s')?.value)).toEqual([ 'urn:upper-tag' ]);
+  });
+
+  it('reads the default graph as the union of all graphs when requested', async() => {
+    const sources = [{ type: 'cottas', value: quadFixture }];
+
+    const scoped = await engine.queryBindings('SELECT * WHERE { ?s ?p ?o }', { sources });
+    await expect(scoped.toArray()).resolves.toHaveLength(1);
+
+    const union = await engine.queryBindings(
+      'SELECT * WHERE { ?s ?p ?o }',
+      { sources, unionDefaultGraph: true },
+    );
+    await expect(union.toArray()).resolves.toHaveLength(3);
   });
 });

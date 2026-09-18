@@ -16,6 +16,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
   protected readonly object: RDF.Term;
   protected readonly graph: RDF.Term;
   protected readonly pageSize: number;
+  protected readonly unionDefaultGraph: boolean;
 
   protected position: number;
   protected nextPageSize: number;
@@ -33,10 +34,13 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
        * Larger pages cost fewer scans of the file, at the cost of reading further ahead.
        */
       pageSize?: number;
+      /** Whether the default graph is the union of all graphs. */
+      unionDefaultGraph?: boolean;
     },
   ) {
     super(options);
     this.pageSize = options.pageSize ?? 0;
+    this.unionDefaultGraph = options.unionDefaultGraph ?? false;
     this.cottasDocument = cottasDocument;
     this.bindingsFactory = bindingsFactory;
     this.subject = subject;
@@ -64,7 +68,8 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
       variables.push({ variable: this.graph, canBeUndef: false });
     }
 
-    this.cottasDocument.countPattern(subject, predicate, object, this.graph)
+    this.cottasDocument
+      .countPattern(subject, predicate, object, this.graph, { unionDefaultGraph: this.unionDefaultGraph })
       .then(({ totalCount, hasExactCount }) => {
         this.setProperty('metadata', {
           state: new MetadataValidationState(),
@@ -91,7 +96,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
       this.predicate,
       this.object,
       this.graph,
-      { offset: this.position, limit },
+      { offset: this.position, limit, unionDefaultGraph: this.unionDefaultGraph },
     ).then((searchResult: ICottasBindingsResult) => {
       for (const b of searchResult.bindings) {
         this._push(b);
