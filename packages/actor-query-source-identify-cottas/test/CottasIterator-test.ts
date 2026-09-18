@@ -233,6 +233,71 @@ describe('CottasIterator', () => {
     ]);
   });
 
+  it('should request buffer-sized pages when no page size is configured', async() => {
+    const limits: number[] = [];
+    const searchBindings = cottasDocument.searchBindings.bind(cottasDocument);
+    jest.spyOn(cottasDocument, 'searchBindings').mockImplementation((...args: any[]) => {
+      limits.push(args[5].limit);
+      return searchBindings(...args);
+    });
+    const iterator = new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      { maxBufferSize: 2 },
+    );
+    await arrayifyStream(iterator);
+    expect(limits.length).toBeGreaterThan(1);
+    expect(Math.max(...limits)).toBeLessThanOrEqual(2);
+  });
+
+  it('should request growing pages up to the configured page size', async() => {
+    const limits: number[] = [];
+    const searchBindings = cottasDocument.searchBindings.bind(cottasDocument);
+    jest.spyOn(cottasDocument, 'searchBindings').mockImplementation((...args: any[]) => {
+      limits.push(args[5].limit);
+      return searchBindings(...args);
+    });
+    const iterator = new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.variable('p'),
+      DF.variable('o'),
+      { maxBufferSize: 2, pageSize: 8 },
+    );
+    const bindings = await arrayifyStream(iterator);
+
+    // All eight triples are still returned exactly once.
+    expect(bindings).toHaveLength(8);
+
+    // Pages grow instead of staying at the buffer size, and never exceed the configured page size.
+    expect(limits[0]).toBeLessThanOrEqual(2);
+    expect(limits.at(-1)).toBeGreaterThan(limits[0]);
+    expect(Math.max(...limits)).toBeLessThanOrEqual(8);
+    for (let i = 1; i < limits.length; i++) {
+      expect(limits[i]).toBeGreaterThanOrEqual(limits[i - 1]);
+    }
+  });
+
+  it('should page correctly when the page size is smaller than the buffer size', async() => {
+    await expect(new CottasIterator(
+      cottasDocument,
+      BF,
+      DF.variable('s'),
+      DF.namedNode('p1'),
+      DF.variable('o'),
+      { maxBufferSize: 4, pageSize: 1 },
+    )).toEqualBindingsStream([
+      BF.fromRecord({ s: DF.namedNode('s1'), o: DF.namedNode('o1') }),
+      BF.fromRecord({ s: DF.namedNode('s1'), o: DF.namedNode('o2') }),
+      BF.fromRecord({ s: DF.namedNode('s2'), o: DF.namedNode('o1') }),
+      BF.fromRecord({ s: DF.namedNode('s2'), o: DF.namedNode('o2') }),
+    ]);
+  });
+
   it('should not return anything when the document is closed', async() => {
     cottasDocument.close();
     await expect(new CottasIterator(

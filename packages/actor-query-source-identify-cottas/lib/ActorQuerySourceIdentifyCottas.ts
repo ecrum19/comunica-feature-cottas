@@ -26,12 +26,14 @@ export class ActorQuerySourceIdentifyCottas extends ActorQuerySourceIdentify {
 
   public readonly mediatorMergeBindingsContext: MediatorMergeBindingsContext;
   public readonly maxBufferSize: number;
+  public readonly pageSize: number;
 
   public constructor(args: IActorQuerySourceIdentifyCottasArgs) {
     super(args);
     this.httpInvalidator = args.httpInvalidator;
     this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
     this.maxBufferSize = args.maxBufferSize;
+    this.pageSize = args.pageSize;
     this.httpInvalidator.addInvalidateListener(
       ({ url }: IActionHttpInvalidate) => {
         // eslint-disable-next-line ts/no-floating-promises
@@ -60,6 +62,7 @@ export class ActorQuerySourceIdentifyCottas extends ActorQuerySourceIdentify {
       dataFactory,
       await BindingsFactory.create(this.mediatorMergeBindingsContext, action.context, dataFactory),
       this.maxBufferSize,
+      this.pageSize,
     );
     this.createdSources.push(new WeakRef(source));
 
@@ -102,8 +105,17 @@ export interface IActorQuerySourceIdentifyCottasArgs extends IActorQuerySourceId
    */
   mediatorMergeBindingsContext: MediatorMergeBindingsContext;
   /**
-   * The maximum number of triples that can be retrieved from COTTAS files in a single call.
+   * The number of bindings this actor's iterators buffer ahead of their consumer.
    * @default {128}
    */
   maxBufferSize: number;
+  /**
+   * The number of bindings to request from a COTTAS file in a single call.
+   * Every call is a separate scan of the file that seeks to its offset, and that seek is linear in
+   * the offset, so small pages make a full traversal quadratic. Pages grow from the buffer size up
+   * to this value.
+   * @range {integer}
+   * @default {8192}
+   */
+  pageSize: number;
 }

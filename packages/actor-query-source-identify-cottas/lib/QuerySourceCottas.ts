@@ -24,6 +24,7 @@ export class QuerySourceCottas implements IQuerySource {
   private readonly dataFactory: ComunicaDataFactory;
   private readonly bindingsFactory: BindingsFactory;
   private readonly maxBufferSize: number;
+  private readonly pageSize: number;
   private readonly selectorShape: FragmentSelectorShape;
   private disposed = false;
 
@@ -33,6 +34,7 @@ export class QuerySourceCottas implements IQuerySource {
     dataFactory: ComunicaDataFactory,
     bindingsFactory: BindingsFactory,
     maxBufferSize: number,
+    pageSize: number,
   ) {
     this.cottasPath = cottasPath;
     this.referenceValue = cottasPath;
@@ -40,6 +42,7 @@ export class QuerySourceCottas implements IQuerySource {
     this.dataFactory = dataFactory;
     this.bindingsFactory = bindingsFactory;
     this.maxBufferSize = maxBufferSize;
+    this.pageSize = pageSize;
     const subject = this.dataFactory.variable('s');
     const predicate = this.dataFactory.variable('p');
     const object = this.dataFactory.variable('o');
@@ -80,7 +83,12 @@ export class QuerySourceCottas implements IQuerySource {
       operation.subject,
       operation.predicate,
       operation.object,
-      { autoStart: false, maxBufferSize: this.maxBufferSize, graph: operation.graph },
+      {
+        autoStart: false,
+        maxBufferSize: this.maxBufferSize,
+        pageSize: this.pageSize,
+        graph: operation.graph,
+      },
     );
   }
 

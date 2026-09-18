@@ -31,6 +31,7 @@ describe('QuerySourceCottas', () => {
       DF,
       BF,
       128,
+      8192,
     );
   });
 
@@ -131,7 +132,7 @@ describe('QuerySourceCottas', () => {
           DF.quad(DF.namedNode('s1'), DF.namedNode('p'), DF.namedNode('o1'), DF.namedNode('g1')),
           DF.quad(DF.namedNode('s2'), DF.namedNode('p'), DF.namedNode('o2'), DF.namedNode('g2')),
         ]);
-        const quadSource = new QuerySourceCottas('quads', quadDocument, DF, BF, 128);
+        const quadSource = new QuerySourceCottas('quads', quadDocument, DF, BF, 128, 8192);
         const data = quadSource.queryBindings(AF.createPattern(
           DF.variable('s'),
           DF.namedNode('p'),

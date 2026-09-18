@@ -68,6 +68,7 @@ describe('ActorQuerySourceIdentifyCottas', () => {
         httpInvalidator,
         mediatorMergeBindingsContext,
         maxBufferSize: 128,
+        pageSize: 8192,
       });
     });
 
@@ -103,6 +104,15 @@ describe('ActorQuerySourceIdentifyCottas', () => {
         });
         expect(ret.querySource.source).toBeInstanceOf(QuerySourceCottas);
         expect(ret.querySource.context).not.toBe(contextIn);
+      });
+
+      it('should forward the buffer and page sizes to the source', async() => {
+        const ret = await actor.run({
+          querySourceUnidentified: { type: 'cottas', value: 'path/' },
+          context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
+        });
+        expect((<any> ret.querySource.source).maxBufferSize).toBe(128);
+        expect((<any> ret.querySource.source).pageSize).toBe(8192);
       });
 
       it('should get the source with context', async() => {
