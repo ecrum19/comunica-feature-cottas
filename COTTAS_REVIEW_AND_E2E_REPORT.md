@@ -15,6 +15,10 @@
 
 ## Bugs
 
+> **Status:** both are fixed on branch `fix-term-matching` (`c60ebd1`). Verification is in
+> "Confidence in the C1/C2 fix" below. C1 is fixed for the encodings that RDF itself calls
+> equivalent; escapes originating in the file remain out of scope by design.
+
 ### 🔴 C1 — Constant pushdown does raw string equality → silent missing results
 
 `CottasDocument.serializeTerm` serialises the query constant with N3's N-Triples writer, then does `o = $term` in SQL. Any **legal but non-canonical** N-Triples encoding in the file decodes fine on read but can *never* be matched by a constant.
@@ -201,7 +205,7 @@ from a clean checkout of commit `7782bbd` in `~/cottas-bench-test`. Existing VM 
 | `yarn run test-performance` | ✅ 9/9 script tests + 4 JBR config validations |
 | WatDiv-10 `performance:prepare` | ✅ **47 s** — checksum-verified asset fetch, JBR prepare, Docker image build, pycottas conversion |
 | WatDiv-10 `performance:run` | ✅ **30.4 min**, exit 0, 0 query errors, `check-results.js` passed |
-| BSBM-1k `performance:ci` (vcf-bench-2) | ▶ running at time of writing |
+| BSBM-1k `performance:ci` (vcf-bench-2) | ❌ **failed after 23 min** — see below |
 
 Conversion output is sound: 152 MB `dataset.nt` → **4.76 MB `dataset.cottas`** (32× smaller) for
 1,079,876 triples, with `dataset.cottas.json` recording pycottas 1.1.0 / duckdb 1.4.3 / pyoxigraph
@@ -225,8 +229,45 @@ with `error=false`. I checked this against DuckDB rather than assuming: for S3, 
 correct answer**. The WatDiv instantiations are simply selective — not an engine defect. It does
 mean a large part of the suite measures empty-result latency rather than result throughput.
 
+### BSBM-1k failed: the endpoint timeout is inconsistent between benchmarks
+
+BSBM ran 359 queries, then:
+
+```
+Worker … timed out for query 360.
+Shutting down worker … with 1 open connections.
+Worker … died with 15. Starting new worker.
+```
+
+BSBM's Java test driver does not tolerate the restart window — it got `Connection refused`, aborted,
+and left no `single.xml`, so the whole run errored and `check-results.js` never ran.
+
+Root cause is a config inconsistency, not a crash: WatDiv's hook passes `-t 500`, **BSBM's passes no
+`-t` at all**, so it inherits `HttpServiceSparqlEndpoint`'s default of `60_000` ms. One query over
+60 s kills the run. Give BSBM the same explicit timeout, and consider that a single slow query
+currently costs the entire benchmark rather than one measurement.
+
+### Where the query time actually goes
+
+Profiling WatDiv C2 (30 s, 0 solutions) by counting every adapter call:
+
+| | calls |
+|---|---:|
+| `countPattern` (exact `COUNT(*)`, one Parquet scan each) | **11,294** |
+| `searchBindings` (paged reads) | 338 |
+| rows actually fetched | 1,589 |
+
+The engine issues roughly **seven cardinality probes per row it ends up reading**. Page size is not
+the lever — see below — the duplicated `COUNT(*)` probes are (finding D3).
+
 ### Issues found
 
+- 🔴 **Page size will not fix the benchmark runtime.** Measured on WatDiv C2: `pageSize` 128 →
+  31.0 s, 65536 → 30.1 s. A 512× change moves the query by 3%, because only 1,589 rows are read in
+  total across 338 calls. Memoizing `countPattern` per distinct pattern instead took the same query
+  from **30.0 s to 13.0 s (2.3×)** with identical results, serving 9,109 of 11,294 probes from cache.
+  A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per
+  pattern is safe; it needs a bounded LRU (one query produced 2,185 distinct patterns).
 - 🔴 **The 120-minute CI timeout will not hold.** WatDiv-10 alone took 30.4 min for the head engine.
   On a pull request the job runs base *and* head sequentially, so that benchmark is already ~61 min
   of the 120-minute budget before WatDiv-100 or BSBM-10k are considered. WatDiv-100 is ten times the
@@ -247,6 +288,45 @@ unit tests cover the comparison arithmetic and the 150% threshold, but not a rea
 
 ---
 
+## Confidence in the C1/C2 fix
+
+**C2 — high.** The change is small and mirrors Comunica's own `QuerySourceRdfJs` semantics
+(default-graph patterns and graph variables both widen). Covered by adapter, source, and engine
+tests, and the original reproduction (`unionDefaultGraph: true` over a quad file) went from 2
+solutions to the correct 5. There is no unbounded input class left unhandled.
+
+**C1 — high for the cases it targets, deliberately partial overall.**
+
+Fixed and verified: `xsd:string` vs simple literals, language-tag case, and N3's astral/control
+escapes against raw storage. Each is a closed set of encodings, matched by an `IN` list or a
+`starts_with` + `lower()` pair, so there is no "mostly works" middle ground — either the encoding
+is in the set or it is not.
+
+*Not* fixed: escapes that originate in the **file** (`<urn:caf\u00E9>`). That set is unbounded, so
+no pushdown predicate can cover it; the only complete fix is normalising the column, which costs
+the pushdown. The format contract stays canonical N-Triples, which both reference writers produce.
+
+What the confidence rests on:
+
+| Evidence | Result |
+|---|---|
+| Unit tests | 86 passing, 100% statement/branch/function/line |
+| Report's own reproduction harness (terms) | 10/14 → **12/14**; the 2 remaining are the file-side escapes |
+| Report's own reproduction harness (graphs/terms) | 22/27 → **24/27**; the 3 remaining are upstream Comunica or wrong expectations in the harness |
+| Real genome data, test-1k (94,919 triples) | **32/32** vs DuckDB ground truth, incl. exact md5 of the full scan |
+| Real genome data, test-10k (958,919 triples) | **32/32** vs DuckDB ground truth |
+
+The genome runs are the ones that rule out a false-positive regression: `object-plain-literal-pushdown`
+now matches two encodings instead of one, and still returns exactly DuckDB's 2,473 rows, so the
+widened predicate does not over-match on real data.
+
+Residual risk is low but not zero: the language predicate relies on `starts_with` pinning the
+lexical form so that `lower()` can only vary the tag. That reasoning holds for any lexical form —
+including one containing `"@` — because the prefix is built by length from the serialization rather
+than by parsing, but it is the one part of the change worth a second reviewer's eye.
+
+---
+
 ## Suggested priority
 
 1. ~~**D1** — paging~~ ✅ **done** (see "Fix applied"). 17× on a 959k-triple scan; HG005 `LIMIT 10000` went from a 5-minute timeout to 14.9 s.
@@ -254,7 +334,9 @@ unit tests cover the comparison arithmetic and the 150% threshold, but not a rea
 3. Add a **> 128-row fixture** to the unit suite. The fix added three page-ramp tests against the mock, but there is still no *real* multi-page Parquet fixture in the repo.
 4. C2, D4, D6 are small.
 5. If genome-scale reads matter more later, the next step beyond `pageSize` is a real DuckDB streaming cursor per iterator — that would also fix the deep-`OFFSET` case, which `pageSize` does not help.
-6. Raise the benchmark CI timeout before enabling the matrix on pull requests (see the benchmark section).
+6. Give BSBM's endpoint hook the same explicit `-t` as WatDiv's; without it one slow query aborts the whole benchmark.
+7. Cache `countPattern` per pattern behind a bounded LRU (D3). Measured 2.3x on WatDiv C2, and it is the only lever that moves the benchmark runtime — page size does not.
+8. Raise the benchmark CI timeout before enabling the matrix on pull requests.
 
 ---
 
