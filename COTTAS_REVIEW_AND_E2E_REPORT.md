@@ -269,6 +269,12 @@ the lever — see below — the duplicated `COUNT(*)` probes are (finding D3).
   A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per
   pattern is safe; it needs a bounded LRU (one query produced 2,185 distinct patterns).
 - ✅ **Fixed:** BSBM's endpoint hook now passes `-t 500`, matching WatDiv, in both `benchmark-bsbm-cottas` and `benchmark-bsbm-cottas-10k`.
+- 🔴 **A failed run leaves a Docker network behind that blocks the next one.** The aborted BSBM run
+  left `jbr-experiment-…-bsbm-network`; the retry died in 2.7 s with
+  `409 … network with name … already exists`. CI's cleanup step is
+  `docker ps -aq | xargs -r docker rm -f`, which removes **containers only**, so the same failure
+  would strand a runner that reuses state or a rerun of a failed job. Add
+  `docker network ls --filter name=jbr -q | xargs -r docker network rm` alongside it.
 - 🔴 **The 120-minute CI timeout will not hold.** WatDiv-10 alone took 30.4 min for the head engine.
   On a pull request the job runs base *and* head sequentially, so that benchmark is already ~61 min
   of the 120-minute budget before WatDiv-100 or BSBM-10k are considered. WatDiv-100 is ten times the
@@ -338,6 +344,62 @@ than by parsing, but it is the one part of the change worth a second reviewer's 
 6. Give BSBM's endpoint hook the same explicit `-t` as WatDiv's; without it one slow query aborts the whole benchmark.
 7. Cache `countPattern` per pattern behind a bounded LRU (D3). Measured 2.3x on WatDiv C2, and it is the only lever that moves the benchmark runtime — page size does not. **Deliberately deferred**; tracked under "Future optimizations" in `COTTAS_IMPLEMENTATION_CHECKLIST.md`.
 8. Raise the benchmark CI timeout before enabling the matrix on pull requests.
+
+---
+
+## Before a PR to the Comunica organisation
+
+What changes when this leaves a personal fork and CI actually executes.
+
+### Blocking
+
+1. **Repository ownership.** CI already targets `comunica/` Docker Hub, the
+   `comunica/comunica-performance-results` repo, Coveralls, and the `@comunica/*` npm scope, and the
+   packages already claim those names. None of it works from `ecrum19/`. Secrets needed on the org
+   repo: `DOCKER_USERNAME`, `DOCKER_PASSWORD`, `PAT` (plus the automatic `github_token`).
+   Credit where due: historical publishing is already guarded on
+   `github.repository == 'comunica/comunica-feature-cottas'` **and** `secrets.PAT != ''`, so it
+   degrades cleanly on a fork rather than failing.
+2. **The large benchmarks have never been run — at any scale, anywhere.** `benchmark-watdiv-cottas-100`
+   and `benchmark-bsbm-cottas-10k` are wired into the CI matrix but have only ever been
+   config-validated. Run both on a VM before the PR; enabling untested 10x-scale jobs in shared CI
+   is the single biggest risk in this change.
+3. **The 120-minute job timeout is probably too small.** Measured: WatDiv-10 took **30.4 min** for
+   the head engine alone on an 8-core/31 GB VM. A pull request runs base *and* head, so that is
+   ~61 min — on a GitHub-hosted runner with roughly half the cores. That fits inside its own
+   120-minute matrix job, but scale 100 has ten times the data (C3 alone returned 244k rows at
+   scale 10) and will not. Measure, then raise `timeout-minutes`, cut `queryRunnerReplication`, or
+   drop the 10x jobs from PR runs and keep them on `master` only.
+4. **Docker network cleanup** (see "Issues found") — one line, but it strands reruns after any failure.
+
+### Worth doing first
+
+5. **Merge the two branches.** `benchmark-workflow` and `fix-term-matching` merge cleanly with no
+   conflicts (verified with a trial merge); there is nothing to reconcile by hand.
+6. **Disk headroom.** A PR run holds two checkouts (1.1 GB each, of which 849 MB is `node_modules`),
+   the 513 MB converter image, the BSBM generator image, plus generated data — 146 MB of N-Triples
+   at WatDiv scale 10, so roughly 1.5 GB at scale 100. Comfortable on the VM, tight on a
+   standard hosted runner.
+7. **Dead `integration` script.** `engines/query-sparql-cottas` still points at
+   `…/manifest-ldf-tests/sparql-cottas/cottas-manifest.ttl`, which **404s**. CI does not invoke it
+   (the step is `if: ${{ false }}`), so it blocks nothing — but either author that manifest in
+   `comunica/manifest-ldf-tests` or drop the script rather than shipping a broken one.
+
+### Parity with `comunica-feature-hdt`
+
+8. **Versioning.** `lerna.json` is `5.3.0` with every package pinned to `^5.3.0`, conflating this
+   feature's release train with Comunica's. HDT sits at its own `5.0.1` while depending on Comunica
+   `^5.4.0`. Reset to an honest starting version before the first tag.
+9. **Changelog format.** `CHANGELOG.md` is a hand-written block; the `version` script is
+   `manual-git-changelog onversion`, which expects HDT's per-version anchor format.
+10. **Remove the three `COTTAS_IMPLEMENTATION_*.md` files.** They are build-process artefacts with no
+    HDT counterpart. Anything durable belongs in `CHANGELOG.md` or the package READMEs. Doing so also
+    lets the `COTTAS_IMPLEMENTATION_PLAN.md` entries come out of `eslint.config.js` and `.eslintignore`.
+11. **`yarn.lock`.** HDT ships none and runs a plain `yarn install`. Keeping it is defensible, but
+    `--ignore-engines` in CI is currently masking that `yarn install` fails on Node 22.20.0 while the
+    README promises "Node.js 22 or newer" (D6). Fix the claim either way.
+12. **README badges and the actor's Config Parameters list** — the latter now exists; the CI,
+    Coveralls, npm and Docker Hub badges only become meaningful after step 1.
 
 ---
 
