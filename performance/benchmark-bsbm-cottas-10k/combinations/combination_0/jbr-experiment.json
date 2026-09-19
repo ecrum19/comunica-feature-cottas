@@ -13,5 +13,5 @@
   "endpointUrlExternal": "http://localhost:3001/sparql",
   "warmupRuns": 5,
   "runs": 10,
-  "hookSparqlEndpoint": { "@id": "urn:jbr:benchmark-bsbm-cottas-10k:hookSparqlEndpoint", "@type": "HookCli", "entrypoint": ["node", "../../engines/query-sparql-cottas/bin/http.js", "cottas@generated/dataset.cottas", "-p", "3001", "-t", "500"], "statsFilePath": "output/stats.csv" }
+  "hookSparqlEndpoint": { "@id": "urn:jbr:benchmark-bsbm-cottas-10k:hookSparqlEndpoint", "@type": "HookCli", "entrypoint": ["node", "../../engines/query-sparql-cottas/bin/http.js", "cottas@generated/dataset.cottas", "-p", "3001", "-t", "1800"], "statsFilePath": "output/stats.csv" }
 }
