@@ -205,7 +205,9 @@ from a clean checkout of commit `7782bbd` in `~/cottas-bench-test`. Existing VM 
 | `yarn run test-performance` | ✅ 9/9 script tests + 4 JBR config validations |
 | WatDiv-10 `performance:prepare` | ✅ **47 s** — checksum-verified asset fetch, JBR prepare, Docker image build, pycottas conversion |
 | WatDiv-10 `performance:run` | ✅ **30.4 min**, exit 0, 0 query errors, `check-results.js` passed |
-| BSBM-1k `performance:ci` (vcf-bench-2) | ❌ **failed after 23 min** — see below |
+| BSBM-1k `performance:ci` (vcf-bench-2) | ✅ **25.0 min**, exit 0, after the timeout fix below |
+| WatDiv-100 `performance:prepare` (vcf-bench-1) | ✅ **134 s** — 10,930,937 triples, 1.5 GB generated |
+| WatDiv-100 / BSBM-10k timing runs | ▶ running with `-t 1800` |
 
 Conversion output is sound: 152 MB `dataset.nt` → **4.76 MB `dataset.cottas`** (32× smaller) for
 1,079,876 triples, with `dataset.cottas.json` recording pycottas 1.1.0 / duckdb 1.4.3 / pyoxigraph
@@ -229,7 +231,13 @@ with `error=false`. I checked this against DuckDB rather than assuming: for S3, 
 correct answer**. The WatDiv instantiations are simply selective — not an engine defect. It does
 mean a large part of the suite measures empty-result latency rather than result throughput.
 
-### BSBM-1k failed: the endpoint timeout is inconsistent between benchmarks
+### BSBM-1k failed, then passed: the endpoint timeout was too short
+
+**Resolved.** With `-t 500` the benchmark completes in **25.0 min**, exit 0, 12 metrics and a
+37.9 s sum of medians. BSBM query 5 dominates at **27.0 s** — which is exactly why the old 60 s
+default bit: its slower instances crossed the ceiling.
+
+The original failure:
 
 BSBM ran 359 queries, then:
 
@@ -242,10 +250,14 @@ Worker … died with 15. Starting new worker.
 BSBM's Java test driver does not tolerate the restart window — it got `Connection refused`, aborted,
 and left no `single.xml`, so the whole run errored and `check-results.js` never ran.
 
-Root cause is a config inconsistency, not a crash: WatDiv's hook passes `-t 500`, **BSBM's passes no
-`-t` at all**, so it inherits `HttpServiceSparqlEndpoint`'s default of `60_000` ms. One query over
-60 s kills the run. Give BSBM the same explicit timeout, and consider that a single slow query
-currently costs the entire benchmark rather than one measurement.
+Root cause was a config inconsistency, not a crash: WatDiv's hook passes `-t 500`, **BSBM's passed no
+`-t` at all**, so it inherited `HttpServiceSparqlEndpoint`'s default of `60_000` ms. One query over
+60 s killed the run.
+
+Worth knowing: `comunica-feature-hdt` also passes no `-t` on **either** of its BSBM benchmarks, so
+adding it here is a deliberate divergence rather than a parity fix — HDT is simply fast enough that
+the 60 s default never bites. A single slow query still costs the entire BSBM run rather than one
+measurement, which is a fragility in BSBM's Java driver, not something this repo controls.
 
 ### Where the query time actually goes
 
@@ -360,10 +372,11 @@ What changes when this leaves a personal fork and CI actually executes.
    Credit where due: historical publishing is already guarded on
    `github.repository == 'comunica/comunica-feature-cottas'` **and** `secrets.PAT != ''`, so it
    degrades cleanly on a fork rather than failing.
-2. **The large benchmarks have never been run — at any scale, anywhere.** `benchmark-watdiv-cottas-100`
-   and `benchmark-bsbm-cottas-10k` are wired into the CI matrix but have only ever been
-   config-validated. Run both on a VM before the PR; enabling untested 10x-scale jobs in shared CI
-   is the single biggest risk in this change.
+2. **The large benchmarks are being measured now.** `benchmark-watdiv-cottas-100` and
+   `benchmark-bsbm-cottas-10k` were wired into the CI matrix having only ever been config-validated.
+   WatDiv-100 preparation now works (10,930,937 triples, 134 s, 1.5 GB); the timing runs are in
+   flight on vcf-bench-1 with `-t 1800`. Do not enable these jobs in shared CI until those numbers
+   exist — that remains the single biggest risk in this change.
 3. **The 120-minute job timeout is probably too small.** Measured: WatDiv-10 took **30.4 min** for
    the head engine alone on an 8-core/31 GB VM. A pull request runs base *and* head, so that is
    ~61 min — on a GitHub-hosted runner with roughly half the cores. That fits inside its own
