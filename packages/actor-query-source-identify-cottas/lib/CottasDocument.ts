@@ -13,11 +13,58 @@ const COTTAS_COLUMNS = new Set([ 's', 'p', 'o', 'g' ]);
 const REQUIRED_COLUMNS = [ 's', 'p', 'o' ];
 const TERM_PREFIX = '<urn:comunica:cottas:subject> <urn:comunica:cottas:predicate> ';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+/**
+ * Cardinality results kept per COTTAS document. Each entry is a short key and a small object, so
+ * the bound costs a few megabytes at most; one WatDiv query produced ~2,200 distinct patterns.
+ */
+const CARDINALITY_CACHE_SIZE = 65_536;
 
 /** Cardinality information returned by a COTTAS pattern scan. */
 export interface ICottasCountResult {
   totalCount: number;
   hasExactCount: boolean;
+}
+
+/**
+ * A bounded least-recently-used cache of pending cardinality lookups.
+ *
+ * A COTTAS document is a read-only file for its whole lifetime, so a pattern's cardinality cannot
+ * change and may be reused. Pending promises are stored rather than resolved values, so the
+ * concurrent duplicate probes a bind join produces collapse onto a single query.
+ */
+export class CardinalityCache<T> {
+  private readonly entries = new Map<string, Promise<T>>();
+  private readonly maxSize: number;
+
+  public constructor(maxSize: number) {
+    this.maxSize = maxSize;
+  }
+
+  public get(key: string): Promise<T> | undefined {
+    const entry = this.entries.get(key);
+    if (entry) {
+      // Re-insert so that the most recently used key is evicted last.
+      this.entries.delete(key);
+      this.entries.set(key, entry);
+    }
+    return entry;
+  }
+
+  public set(key: string, value: Promise<T>): void {
+    this.entries.set(key, value);
+    // A failed lookup must not be remembered; the next caller should retry it.
+    value.catch(() => this.entries.delete(key));
+    for (const oldest of this.entries.keys()) {
+      if (this.entries.size <= this.maxSize) {
+        break;
+      }
+      this.entries.delete(oldest);
+    }
+  }
+
+  public clear(): void {
+    this.entries.clear();
+  }
 }
 
 /** Graph-matching options shared by the COTTAS read operations. */
@@ -87,6 +134,7 @@ class DuckDBCottasDocument implements CottasDocument {
   private readonly dataFactory: ComunicaDataFactory;
   private readonly instance: DuckDBInstance;
   private readonly termWriter = new Writer({ format: 'N-Triples' });
+  private readonly cardinalities = new CardinalityCache<ICottasCountResult>(CARDINALITY_CACHE_SIZE);
   private operationQueue: Promise<void> = Promise.resolve();
 
   public constructor(
@@ -110,7 +158,12 @@ class DuckDBCottasDocument implements CottasDocument {
     graph: RDF.Term = this.dataFactory.defaultGraph(),
     options: ICottasGraphOptions = {},
   ): Promise<ICottasCountResult> {
-    return this.enqueue(async() => {
+    const key = this.cardinalityKey(subject, predicate, object, graph, options);
+    const cached = this.closed ? undefined : this.cardinalities.get(key);
+    if (cached) {
+      return cached;
+    }
+    const pending = this.enqueue(async() => {
       const pattern = this.patternSql(subject, predicate, object, graph, options);
       if (pattern.impossible) {
         return { totalCount: 0, hasExactCount: true };
@@ -131,6 +184,10 @@ class DuckDBCottasDocument implements CottasDocument {
       }
       return { totalCount, hasExactCount: true };
     });
+    if (!this.closed) {
+      this.cardinalities.set(key, pending);
+    }
+    return pending;
   }
 
   public async searchBindings(
@@ -181,6 +238,7 @@ class DuckDBCottasDocument implements CottasDocument {
       return;
     }
     this.closed = true;
+    this.cardinalities.clear();
     await this.operationQueue;
     // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
     this.connection.closeSync();
@@ -284,6 +342,44 @@ class DuckDBCottasDocument implements CottasDocument {
     return encodings.length === 1 ?
         `${column} = ${addValue(encodings[0])}` :
         `${column} IN (${encodings.map(addValue).join(', ')})`;
+  }
+
+  /**
+   * Build a cache key identifying everything that can change a pattern's cardinality.
+   *
+   * Variables are numbered by first occurrence rather than by name, so `?x ?p ?x` and `?x ?p ?y`
+   * stay distinct (the first adds an equality condition) while `?a ?b ?c` and `?x ?y ?z` share one
+   * entry. Serialized terms never contain a newline, which makes it a safe separator.
+   */
+  private cardinalityKey(
+    subject: RDF.Term,
+    predicate: RDF.Term,
+    object: RDF.Term,
+    graph: RDF.Term,
+    options: ICottasGraphOptions,
+  ): string {
+    const variables = new Map<string, number>();
+    const part = (term: RDF.Term): string => {
+      if (term.termType === 'Variable') {
+        let index = variables.get(term.value);
+        if (index === undefined) {
+          index = variables.size;
+          variables.set(term.value, index);
+        }
+        return `?${index}`;
+      }
+      if (term.termType === 'DefaultGraph') {
+        return '*default*';
+      }
+      return this.serializeTerm(term);
+    };
+    return [
+      part(subject),
+      part(predicate),
+      part(object),
+      part(graph),
+      options.unionDefaultGraph ? 'union' : 'scoped',
+    ].join('\n');
   }
 
   private patternSql(

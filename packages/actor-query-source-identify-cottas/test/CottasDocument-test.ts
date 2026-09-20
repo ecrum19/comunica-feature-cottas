@@ -5,7 +5,7 @@ import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { DuckDBInstance } from '@duckdb/node-api';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { openCottasDocument } from '../lib/CottasDocument';
+import { CardinalityCache, openCottasDocument } from '../lib/CottasDocument';
 
 const DF = new DataFactory<RDF.BaseQuad>();
 const BF = new BindingsFactory(DF);
@@ -392,6 +392,104 @@ describe('CottasDocument', () => {
       { offset: 0, limit: 1 },
     )).rejects.toThrow('non-string or null \'s\'');
     await document.close();
+  });
+
+  describe('cardinality caching', () => {
+    it('answers a repeated pattern without querying DuckDB again', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const query = jest.spyOn((<any> document).connection, 'runAndReadAll');
+      const pattern: [RDF.Term, RDF.Term, RDF.Term] = [
+        DF.variable('s'),
+        DF.namedNode('urn:p'),
+        DF.variable('o'),
+      ];
+      await expect(document.countPattern(...pattern)).resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      await expect(document.countPattern(...pattern)).resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      expect(query).toHaveBeenCalledTimes(1);
+      await document.close();
+    });
+
+    it('collapses concurrent probes for the same pattern onto one query', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const query = jest.spyOn((<any> document).connection, 'runAndReadAll');
+      const counts = await Promise.all(Array.from({ length: 8 }, () =>
+        document.countPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'))));
+      expect(counts.every(count => count.totalCount === 5)).toBe(true);
+      expect(query).toHaveBeenCalledTimes(1);
+      await document.close();
+    });
+
+    it('keeps patterns with different cardinalities apart', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const repeated = DF.variable('term');
+      // A repeated variable adds an equality condition, so it must not share the all-variables entry.
+      await expect(document.countPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      await expect(document.countPattern(repeated, DF.namedNode('urn:p'), repeated))
+        .resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await expect(document.countPattern(DF.variable('s'), DF.namedNode('urn:p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      await document.close();
+    });
+
+    it('keeps graph terms and union default graph semantics apart', async() => {
+      const document = await openCottasDocument(quadPath, DF);
+      const spo: [RDF.Term, RDF.Term, RDF.Term] = [
+        DF.variable('s'),
+        DF.variable('p'),
+        DF.variable('o'),
+      ];
+      await expect(document.countPattern(...spo, DF.defaultGraph()))
+        .resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await expect(document.countPattern(...spo, DF.variable('g')))
+        .resolves.toEqual({ totalCount: 2, hasExactCount: true });
+      await expect(document.countPattern(...spo, DF.defaultGraph(), { unionDefaultGraph: true }))
+        .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+      await document.close();
+    });
+
+    it('does not remember a failed lookup', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const failure = new Error('DuckDB unavailable');
+      const query = jest.spyOn((<any> document).connection, 'runAndReadAll')
+        .mockRejectedValueOnce(failure);
+      const pattern: [RDF.Term, RDF.Term, RDF.Term] = [
+        DF.variable('s'),
+        DF.variable('p'),
+        DF.variable('o'),
+      ];
+      await expect(document.countPattern(...pattern)).rejects.toBe(failure);
+      await expect(document.countPattern(...pattern))
+        .resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      expect(query).toHaveBeenCalledTimes(2);
+      await document.close();
+    });
+  });
+
+  describe('CardinalityCache', () => {
+    it('evicts the least recently used entry beyond its bound', async() => {
+      const cache = new CardinalityCache<number>(2);
+      cache.set('a', Promise.resolve(1));
+      cache.set('b', Promise.resolve(2));
+      // Touching 'a' makes 'b' the least recently used entry.
+      await expect(cache.get('a')).resolves.toBe(1);
+      cache.set('c', Promise.resolve(3));
+      expect(cache.get('b')).toBeUndefined();
+      await expect(cache.get('a')).resolves.toBe(1);
+      await expect(cache.get('c')).resolves.toBe(3);
+    });
+
+    it('drops rejected entries and can be cleared', async() => {
+      const cache = new CardinalityCache<number>(4);
+      const rejected = Promise.reject(new Error('nope'));
+      cache.set('bad', rejected);
+      await expect(rejected).rejects.toThrow('nope');
+      expect(cache.get('bad')).toBeUndefined();
+
+      cache.set('good', Promise.resolve(1));
+      cache.clear();
+      expect(cache.get('good')).toBeUndefined();
+    });
   });
 
   it('validates page bounds and closes idempotently', async() => {

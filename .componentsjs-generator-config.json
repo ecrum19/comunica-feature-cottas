@@ -5,7 +5,8 @@
   ],
   "ignoreComponents": [
     "CottasIterator",
-    "QuerySourceCottas"
+    "QuerySourceCottas",
+    "CardinalityCache"
   ],
   "modulePrefix": {}
 }
