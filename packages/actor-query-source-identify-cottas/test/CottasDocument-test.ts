@@ -432,6 +432,16 @@ describe('CottasDocument', () => {
       await document.close();
     });
 
+    it('keys blank node and named node terms apart', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      // The fixture stores `_:blank <urn:p> "42"^^xsd:integer`.
+      await expect(document.countPattern(DF.blankNode('blank'), DF.namedNode('urn:p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await expect(document.countPattern(DF.namedNode('blank'), DF.namedNode('urn:p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 0, hasExactCount: true });
+      await document.close();
+    });
+
     it('keeps graph terms and union default graph semantics apart', async() => {
       const document = await openCottasDocument(quadPath, DF);
       const spo: [RDF.Term, RDF.Term, RDF.Term] = [
@@ -477,6 +487,15 @@ describe('CottasDocument', () => {
       expect(cache.get('b')).toBeUndefined();
       await expect(cache.get('a')).resolves.toBe(1);
       await expect(cache.get('c')).resolves.toBe(3);
+    });
+
+    it('leaves a replacement entry alone when the entry it replaced fails', async() => {
+      const cache = new CardinalityCache<number>(4);
+      const failing = Promise.reject(new Error('stale'));
+      cache.set('k', failing);
+      cache.set('k', Promise.resolve(7));
+      await expect(failing).rejects.toThrow('stale');
+      await expect(cache.get('k')).resolves.toBe(7);
     });
 
     it('drops rejected entries and can be cleared', async() => {

@@ -52,8 +52,13 @@ export class CardinalityCache<T> {
 
   public set(key: string, value: Promise<T>): void {
     this.entries.set(key, value);
-    // A failed lookup must not be remembered; the next caller should retry it.
-    value.catch(() => this.entries.delete(key));
+    // A failed lookup must not be remembered; the next caller should retry it. The identity check
+    // matters because this entry may already have been evicted and replaced by the time it settles.
+    value.catch(() => {
+      if (this.entries.get(key) === value) {
+        this.entries.delete(key);
+      }
+    });
     for (const oldest of this.entries.keys()) {
       if (this.entries.size <= this.maxSize) {
         break;
@@ -349,7 +354,8 @@ class DuckDBCottasDocument implements CottasDocument {
    *
    * Variables are numbered by first occurrence rather than by name, so `?x ?p ?x` and `?x ?p ?y`
    * stay distinct (the first adds an equality condition) while `?a ?b ?c` and `?x ?y ?z` share one
-   * entry. Serialized terms never contain a newline, which makes it a safe separator.
+   * entry. Terms are spelled out directly rather than serialized: the key is built on every probe,
+   * including the misses, so it must not repeat the work `patternSql` already does.
    */
   private cardinalityKey(
     subject: RDF.Term,
@@ -371,7 +377,12 @@ class DuckDBCottasDocument implements CottasDocument {
       if (term.termType === 'DefaultGraph') {
         return '*default*';
       }
-      return this.serializeTerm(term);
+      if (term.termType === 'Literal') {
+        // Cheaper than serializing, and two literals are the same term exactly when their value,
+        // language, and datatype agree. Cache misses are common, so this runs on the hot path.
+        return `"${term.language}\u0001${term.datatype.value}\u0001${term.value}`;
+      }
+      return `${term.termType === 'BlankNode' ? '_:' : '<'}${term.value}`;
     };
     return [
       part(subject),
