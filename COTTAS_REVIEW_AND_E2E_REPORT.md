@@ -306,11 +306,9 @@ the cores, so treat every figure as optimistic.
 `bsbm-cottas-10k` to `master` pushes or a schedule. `WatDiv-100` should not be enabled anywhere
 until C2 is dealt with — either fixed, or excluded from that scale.
 
-**This changes the case for the deferred `countPattern` cache.** C2 is the exact shape the cache
-addresses: a query that reads almost nothing and spends all its time re-probing cardinality
-(11,294 probes for 1,589 rows at scale 10, where memoizing gave 2.3x). At scale 100 that pattern
-stops being a slow query and becomes a failing one. The optimization now looks less like a
-nice-to-have and more like a prerequisite for the large benchmarks to run at all.
+**This changed the case for the deferred `countPattern` cache**, which has since been implemented
+and measured — see "Cardinality cache" below. C2 is the exact shape it addresses: a query that
+reads almost nothing and spends its time re-probing cardinality.
 
 ### Where the query time actually goes
 
@@ -359,6 +357,43 @@ PR/base comparison path including `summarize-results.js --compare` against real 
 unit tests cover the comparison arithmetic and the 150% threshold, but not a real two-checkout run.
 
 ---
+
+## Cardinality cache — implemented and measured (branch `cache-cardinality`)
+
+Implemented on `cache-cardinality` (branched from `fix-term-matching`, so the cache key accounts
+for `unionDefaultGraph` — cardinality differs with it). A bounded LRU of **pending** promises, so
+the concurrent duplicate probes a bind join produces collapse onto one query; failed lookups are
+dropped so the next caller retries; cleared on close; 65,536 entries. 94 tests, 100% coverage.
+
+Measured directly against the WatDiv-100 dataset (10.9M triples), driving the engine without an
+HTTP endpoint so nothing is capped by a worker timeout. Instance 0 unless noted:
+
+| query | no cache | cache, key via `serializeTerm` | cache, cheap key |
+|---|---:|---:|---:|
+| **C2** (0 solutions, 96,052 probes) | 513.5 s | 157.0 s | **134.5 s** → **3.8x** |
+| **C3** (425,591 solutions, 199,691 probes) | 593.2 s | 640.0 s | **548.5 s** → **1.08x** |
+
+C2 instances 0, 1 and 2 are identical at 134.5 / 134.1 / 134.2 s. Solution counts match the
+uncached run exactly, so the cache does not change results.
+
+**The middle column is why this was worth measuring rather than assuming.** The first
+implementation built its key by serializing each bound term, repeating work `patternSql` already
+does. On C3 — miss-heavy, 199,691 probes with few repeats — that cost **8% more than not caching at
+all**. Spelling the term out directly instead (value, language, datatype) turned the same query
+into a 7.5% gain. A cache that helps duplicate-heavy queries can quietly tax miss-heavy ones, and
+only C3 would have caught it.
+
+### Correction to the earlier reading
+
+The section above said WatDiv-100's C2 "cannot finish in half an hour" and inferred it was
+effectively unbounded. **That inference was wrong.** Uncached and uncapped, C2 instance 0 completes
+in **513.5 s**, well inside the 1800 s the benchmark allowed. What is true is only what was
+observed: the benchmark terminated all five C2 instantiations at the endpoint's 1800 s ceiling.
+
+So something about the endpoint path is at least 3.5x slower than driving the engine directly, and
+that gap is **not yet explained**. Until it is, these numbers do not prove the full WatDiv-100
+matrix will now pass — only that the cache removes a large, real cost from the two templates that
+failed. Proving the benchmark itself means re-running it end to end against this build.
 
 ## Confidence in the C1/C2 fix
 
