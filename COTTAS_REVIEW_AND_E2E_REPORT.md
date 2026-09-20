@@ -207,7 +207,9 @@ from a clean checkout of commit `7782bbd` in `~/cottas-bench-test`. Existing VM 
 | WatDiv-10 `performance:run` | ✅ **30.4 min**, exit 0, 0 query errors, `check-results.js` passed |
 | BSBM-1k `performance:ci` (vcf-bench-2) | ✅ **25.0 min**, exit 0, after the timeout fix below |
 | WatDiv-100 `performance:prepare` (vcf-bench-1) | ✅ **134 s** — 10,930,937 triples, 1.5 GB generated |
-| WatDiv-100 / BSBM-10k timing runs | ▶ running with `-t 1800` |
+| WatDiv-100 `performance:run` | ❌ **failed after 7 h 36 min** — C2 exceeded even `-t 1800` |
+| BSBM-10k `performance:prepare` | ✅ **135 s** — 3,564,773 triples, 931 MB generated |
+| BSBM-10k `performance:run` | ✅ **85 min**, exit 0, 0 errors |
 
 Conversion output is sound: 152 MB `dataset.nt` → **4.76 MB `dataset.cottas`** (32× smaller) for
 1,079,876 triples, with `dataset.cottas.json` recording pycottas 1.1.0 / duckdb 1.4.3 / pyoxigraph
@@ -258,6 +260,57 @@ Worth knowing: `comunica-feature-hdt` also passes no `-t` on **either** of its B
 adding it here is a deliberate divergence rather than a parity fix — HDT is simply fast enough that
 the 60 s default never bites. A single slow query still costs the entire BSBM run rather than one
 measurement, which is a fragility in BSBM's Java driver, not something this repo controls.
+
+### The 10x benchmarks: measured at last
+
+Both prepare quickly and correctly. The timing runs are a different story.
+
+| | WatDiv-100 | BSBM-10k |
+|---|---:|---:|
+| triples | 10,930,937 | 3,564,773 |
+| prepare | 134 s | 135 s |
+| run (head engine only) | **27,379 s = 7 h 36 min** ❌ | **5,105 s = 85 min** ✅ |
+| metrics / sum of medians | 20 / 945.0 s | 12 / 155.5 s |
+| slowest template | C3 **538.4 s** (425,591 results) | query 5 **139.3 s** |
+| errors | **6 of 100 instances** | 0 |
+
+**WatDiv-100 failed, and `check-results.js` was right to fail it.** Two distinct errors:
+
+- **C2 errored on all five instantiations with `terminated`** — the endpoint worker was killed, i.e.
+  it blew through even the raised 1800 s ceiling. At scale 10 that same template returns **zero
+  rows in 30 s**; at scale 100 it cannot finish in half an hour. Five instances × four rounds at up
+  to 1800 s each is most of the 7.6 hours.
+- **One C3 instance failed to parse its response** (`Unexpected "!" at position 0 in state STOP`).
+  The other four C3 instances succeeded at ~538 s each, returning 425,591 rows. Most likely
+  collateral from the C2 worker being killed and restarted mid-response — the timing lines up — but
+  that is inference, not proof, and worth confirming if WatDiv-100 is ever enabled.
+
+Scaling is not linear and not uniform: BSBM query 5 went 27.0 s → 139.3 s (5.2x) for 10x the data,
+while WatDiv C3 went 40.1 s → 538.4 s (13.4x) and C2 went from finishing to not finishing at all.
+
+### Verdict on CI feasibility
+
+`timeout-minutes: 120` per matrix job, and a pull request runs base *and* head sequentially:
+
+| Benchmark | Head only | PR (base + head) | Fits a 120 min job? |
+|---|---:|---:|---|
+| BSBM-1k | 25 min | ~50 min | ✅ yes |
+| WatDiv-10 | 30 min | ~61 min | ✅ yes |
+| BSBM-10k | 85 min | ~170 min | ⚠️ master-only, not PRs |
+| WatDiv-100 | 456 min | ~15 h | ❌ no, by 3.8x |
+
+And these were measured on an 8-core / 31 GB VM; a standard GitHub-hosted runner has roughly half
+the cores, so treat every figure as optimistic.
+
+**Recommendation:** ship the PR matrix with `watdiv-cottas` and `bsbm-cottas` only. Move
+`bsbm-cottas-10k` to `master` pushes or a schedule. `WatDiv-100` should not be enabled anywhere
+until C2 is dealt with — either fixed, or excluded from that scale.
+
+**This changes the case for the deferred `countPattern` cache.** C2 is the exact shape the cache
+addresses: a query that reads almost nothing and spends all its time re-probing cardinality
+(11,294 probes for 1,589 rows at scale 10, where memoizing gave 2.3x). At scale 100 that pattern
+stops being a slow query and becomes a failing one. The optimization now looks less like a
+nice-to-have and more like a prerequisite for the large benchmarks to run at all.
 
 ### Where the query time actually goes
 
