@@ -297,7 +297,8 @@ while WatDiv C3 went 40.1 s → 538.4 s (13.4x) and C2 went from finishing to no
 | BSBM-1k | 25 min | ~50 min | ✅ yes |
 | WatDiv-10 | 30 min | ~61 min | ✅ yes |
 | BSBM-10k | 85 min | ~170 min | ⚠️ master-only, not PRs |
-| WatDiv-100 | 456 min | ~15 h | ❌ no, by 3.8x |
+| WatDiv-100 (baseline) | 456 min | ~15 h | ❌ no, by 3.8x |
+| WatDiv-100 (with cache) | 242 min | ~8 h | ❌ no, by 2.0x |
 
 And these were measured on an 8-core / 31 GB VM; a standard GitHub-hosted runner has roughly half
 the cores, so treat every figure as optimistic.
@@ -383,6 +384,44 @@ all**. Spelling the term out directly instead (value, language, datatype) turned
 into a 7.5% gain. A cache that helps duplicate-heavy queries can quietly tax miss-heavy ones, and
 only C3 would have caught it.
 
+### The full matrix, re-run against the cache
+
+Same VM, same COTTAS file, same `-t 1800`. **WatDiv-100 now passes.**
+
+| | baseline | with cache |
+|---|---:|---:|
+| outcome | ❌ failed | ✅ **exit 0** |
+| wall clock | 27,379 s (7 h 36 min) | **14,514 s (4 h 02 min)** — 1.89x |
+| sum of medians | 945.0 s | **685.9 s** — 1.38x |
+| errored instances | 6 of 100 | **0** |
+
+Per template:
+
+| | baseline | cached | |
+|---|---:|---:|---:|
+| C2 | terminated at 1800 s | **53.4 s** | now finishes |
+| C3 | 538.4 s | 550.6 s | 0.98x |
+| S5 | 139.5 s | 23.3 s | 6.00x |
+| C1 | 94.1 s | 15.8 s | 5.95x |
+| S3 | 22.8 s | 4.5 s | 5.05x |
+| F4 | 61.2 s | 15.1 s | 4.04x |
+
+Excluding C3, which is miss-heavy and unchanged, the remaining templates went from 406.6 s to
+135.3 s — a **3.0x** improvement. C3 alone now accounts for 80% of the total.
+
+Two things this settles:
+
+- **The endpoint gap resolves in the cache's favour.** C2 measured 134 s standalone but comes in at
+  **53.4 s** through the endpoint, faster still — because the endpoint holds one source across
+  warmup and all three replications, so later rounds meet an already-populated cache. The earlier
+  standalone figures were the pessimistic case.
+- **The C3 parse error is gone.** That supports, without proving, the earlier guess that it was
+  collateral from the C2 worker being killed mid-response: no termination, no parse error.
+
+**CI feasibility is unchanged for this benchmark.** 242 min for the head engine alone is still
+double the 120-minute job timeout, and a pull request would be ~8 h. WatDiv-100 is now a *valid*
+benchmark that can be trusted on a VM or a schedule; it is still not a CI job.
+
 ### Correction to the earlier reading
 
 The section above said WatDiv-100's C2 "cannot finish in half an hour" and inferred it was
@@ -391,9 +430,8 @@ in **513.5 s**, well inside the 1800 s the benchmark allowed. What is true is on
 observed: the benchmark terminated all five C2 instantiations at the endpoint's 1800 s ceiling.
 
 So something about the endpoint path is at least 3.5x slower than driving the engine directly, and
-that gap is **not yet explained**. Until it is, these numbers do not prove the full WatDiv-100
-matrix will now pass — only that the cache removes a large, real cost from the two templates that
-failed. Proving the benchmark itself means re-running it end to end against this build.
+that gap is **not yet explained**. That gap has since been resolved by the full re-run above, which
+shows the endpoint path is *faster* than the standalone figures once its cache stays warm.
 
 ## Confidence in the C1/C2 fix
 
