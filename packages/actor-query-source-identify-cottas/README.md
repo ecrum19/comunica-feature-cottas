@@ -36,4 +36,18 @@ DuckDB applies bound constants, graph constraints, and repeated-variable equalit
 * `maxBufferSize`: The number of bindings this actor's iterators buffer ahead of their consumer, defaults to `128`.
 * `pageSize`: The number of bindings to request from a COTTAS file in a single call, defaults to `8192`. Every call is a separate scan of the file that seeks to its offset, and that seek is linear in the offset, so small pages make a full traversal quadratic. Pages grow from `maxBufferSize` up to this value.
 
+### Known performance characteristics
+
+Each iterator issues one exact `COUNT(*)` when it starts, and bind joins create one iterator per
+binding, so the same pattern is counted repeatedly. Those results are cached per document behind a
+bounded LRU, which is safe because a COTTAS file is read-only for the lifetime of the source.
+
+Two further optimisations are deliberately not implemented:
+
+* All operations are serialised on a single DuckDB connection, so concurrent triple patterns in a
+  join cannot overlap. DuckDB supports several connections per instance.
+* Paging uses `LIMIT`/`OFFSET`. Growing page sizes removed the cost of re-scanning for a full
+  traversal, but a deep explicit `OFFSET` still has to skip every preceding row; a streaming cursor
+  per iterator would avoid that.
+
 The package includes an independently produced `cottas-rs` fixture plus generated real-Parquet tests for literals, blank nodes, optional graphs, schema failures, cardinality, pagination, and cleanup.

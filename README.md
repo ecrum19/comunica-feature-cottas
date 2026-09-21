@@ -69,8 +69,6 @@ yarn run depcheck
 yarn run verify
 ```
 
-See [COTTAS_IMPLEMENTATION_CHECKLIST.md](COTTAS_IMPLEMENTATION_CHECKLIST.md) for task status and [COTTAS_IMPLEMENTATION_CHANGELOG.md](COTTAS_IMPLEMENTATION_CHANGELOG.md) for architecture and verification details.
-
 ## License
 
 This project follows Comunica's MIT licensing; see [LICENSE.txt](LICENSE.txt). The provenance and Apache-2.0 license of the `cottas-rs` test fixture are recorded beside that fixture.

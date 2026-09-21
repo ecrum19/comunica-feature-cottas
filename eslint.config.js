@@ -82,7 +82,6 @@ module.exports = config([
       'performance/**/generated/**',
       'performance/**/output/**',
       '**/bintest/**',
-      'COTTAS_IMPLEMENTATION_PLAN.md',
       'lerna.json',
     ],
   },

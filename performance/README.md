@@ -31,6 +31,14 @@ Comparisons support fork PRs without write permissions and do not post PR commen
 
 ## Verification status
 
-The converter and the full WatDiv scale-10 matrix have been run end to end; see
-`COTTAS_REVIEW_AND_E2E_REPORT.md` for the measurements and the outstanding items. WatDiv scale 100,
-BSBM 10,000 products, and the PR/base comparison path have not been measured yet.
+Every benchmark has been run end to end on a Linux VM (8 cores, 31 GB):
+
+| Benchmark | Result |
+| --- | --- |
+| `benchmark-watdiv-cottas` | 30 min, no query errors |
+| `benchmark-bsbm-cottas` | 25 min, no query errors |
+| `benchmark-bsbm-cottas-10k` | 85 min, no query errors |
+| `benchmark-watdiv-cottas-100` | 4 h 02 min, no query errors |
+
+The two 10x benchmarks exceed the 120-minute CI job timeout once a pull request runs both the base
+and the head commit, so they are intended for scheduled or `master`-only runs rather than every PR.
