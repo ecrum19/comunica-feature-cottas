@@ -28,19 +28,3 @@ The benchmark-only `**/sparql-benchmark-runner/fetch-sparql-endpoint` resolution
 Raw results, endpoint logs, and COTTAS provenance are uploaded as artifacts, including when a run fails. The consolidation job produces detailed and total JSON reports plus an Actions summary. A PR fails the performance check if a benchmark total exceeds **150% of its base time**. Missing measurements, mismatched metric sets, and query errors also fail the check. The measurements use PSBR's medians per query and sums of those medians for totals, matching the HDT reporting approach.
 
 Comparisons support fork PRs without write permissions and do not post PR comments. Historical publication to `comunica-performance-results` runs only from the canonical Comunica repository when its existing `PAT` is configured. No workflow permissions are changed. The separate docs deployment job is unchanged.
-
-## Verification status
-
-Every benchmark has been run end to end on a Linux VM (8 cores, 31 GB):
-
-| Benchmark | Result |
-| --- | --- |
-| `benchmark-watdiv-cottas` | 30 min, no query errors |
-| `benchmark-bsbm-cottas` | 25 min, no query errors |
-| `benchmark-bsbm-cottas-10k` | 85 min, no query errors (measured before join push-down) |
-| `benchmark-watdiv-cottas-100` | 4 min 46 s, no query errors |
-
-The WatDiv figure is from after basic graph patterns began being answered by a single DuckDB query;
-before that the same matrix took over seven hours. BSBM 10,000 products has not been re-measured
-since that change, so treat it as the job to watch against the 120-minute CI timeout on a pull
-request, which runs both the base and the head commit.

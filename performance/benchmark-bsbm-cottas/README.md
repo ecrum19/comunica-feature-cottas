@@ -1,11 +1,16 @@
-# Benchmark BSBM COTTAS (1,000 products)
+# Benchmark BSBM COTTAS
 
-This package follows the upstream Comunica BSBM benchmark with automatic RDF-to-COTTAS conversion.
+This internal package benchmarks Comunica COTTAS using the [BSBM](http://wbsg.informatik.uni-mannheim.de/bizer/berlinsparqlbenchmark/) benchmark.
 
-```bash
-yarn workspace benchmark-bsbm-cottas performance:ci
-```
+Compare your current version of Comunica locally with the latest published release by running `npm run performance` from within this package.
+This will output a file called `plot_queries_data.svg` that visualizes the performance differences.
 
-No COTTAS file needs to be provided. `performance:prepare` obtains the BSBM RDF input and queries, then converts `generated/dataset.nt` to `generated/dataset.cottas` with pinned pycottas tooling. `performance:run` measures the current engine and rejects query failures. The optional `performance` command compares against the published Docker image.
+If you only want to check the performance of your current version of Comunica,
+you can run `npm run performance:ci` instead,
+which is what the CI will run as well for continuous performance measurements.
 
-See [the benchmark guide](../README.md) for writer settings, file provenance, PR/base comparisons, and verification status.
+No COTTAS file has to be supplied. `performance:prepare` obtains the RDF input and queries and converts them with the pinned
+`pycottas` writer, which emits one file per index order; see [the benchmark guide](../README.md) for the writer settings and
+file provenance.
+
+Continuous performance results are tracked on https://github.com/comunica/comunica-performance-results.

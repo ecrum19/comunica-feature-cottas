@@ -1,11 +1,18 @@
-# Benchmark WatDiv COTTAS (scale 100)
+# Benchmark WatDiv COTTAS 100
 
-This package follows the upstream Comunica WatDiv benchmark with automatic RDF-to-COTTAS conversion.
+This internal package benchmarks Comunica COTTAS using the [WatDiv](https://dsg.uwaterloo.ca/watdiv/) benchmark,
+at scale 100 instead of the scale 10 used by [`benchmark-watdiv-cottas`](../benchmark-watdiv-cottas):
+10 930 937 triples instead of 1 079 876.
 
-```bash
-yarn workspace benchmark-watdiv-cottas-100 performance:ci
-```
+Compare your current version of Comunica locally with the latest published release by running `npm run performance` from within this package.
+This will output a file called `plot_queries_data.svg` that visualizes the performance differences.
 
-No COTTAS file needs to be provided. `performance:prepare` obtains the WatDiv RDF input and queries, then converts `generated/dataset.nt` to `generated/dataset.cottas` with pinned pycottas tooling. `performance:run` measures the current engine and rejects query failures. The optional `performance` command compares against the published Docker image.
+If you only want to check the performance of your current version of Comunica,
+you can run `npm run performance:ci` instead,
+which is what the CI will run as well for continuous performance measurements.
 
-See [the benchmark guide](../README.md) for writer settings, file provenance, PR/base comparisons, and verification status.
+No COTTAS file has to be supplied. `performance:prepare` obtains the RDF input and queries and converts them with the pinned
+`pycottas` writer, which emits one file per index order; see [the benchmark guide](../README.md) for the writer settings and
+file provenance.
+
+Continuous performance results are tracked on https://github.com/comunica/comunica-performance-results.
