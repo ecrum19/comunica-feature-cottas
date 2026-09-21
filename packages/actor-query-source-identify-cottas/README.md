@@ -36,6 +36,21 @@ DuckDB applies bound constants, graph constraints, and repeated-variable equalit
 * `maxBufferSize`: The number of bindings this actor's iterators buffer ahead of their consumer, defaults to `128`.
 * `pageSize`: The number of bindings to request from a COTTAS file in a single call, defaults to `8192`. Every call is a separate scan of the file that seeks to its offset, and that seek is linear in the offset, so small pages make a full traversal quadratic. Pages grow from `maxBufferSize` up to this value.
 
+### Join push-down
+
+The actor accepts a join of triple patterns as well as a single pattern, so a basic graph pattern
+reaches the source whole and is answered by **one** DuckDB query rather than a lookup per
+intermediate binding. Each pattern becomes an alias over the index best suited to its own bound
+components; a variable's first occurrence fixes the column it projects from and every later
+occurrence becomes an equality against it, which is exactly SPARQL's join condition because join
+equality is term equality and terms are stored as canonical N-Triples strings.
+
+Results stream: the join holds one DuckDB streaming result on its own connection and fetches chunks
+as the consumer reads. Paging a join with `LIMIT`/`OFFSET` would re-execute it once per page.
+
+Only joins are pushed down. `FILTER`, `ORDER BY` and aggregates are left to Comunica, because
+SPARQL compares those by value with three-valued logic where SQL would compare strings.
+
 ### Index orders
 
 A source may ship the same data in more than one row order. Beside `data.cottas` the actor looks
@@ -50,9 +65,10 @@ optional: with only the primary file the actor behaves exactly as before.
 
 ### Known performance characteristics
 
-Each iterator issues one exact `COUNT(*)` when it starts, and bind joins create one iterator per
-binding, so the same pattern is counted repeatedly. Those results are cached per document behind a
-bounded LRU, which is safe because a COTTAS file is read-only for the lifetime of the source.
+Each iterator issues one exact `COUNT(*)` when it starts. Those results are cached per document
+behind a bounded LRU, which is safe because a COTTAS file is read-only for the lifetime of the
+source. With join push-down a query issues a handful of these rather than one per intermediate
+binding, so the cache matters much less than it used to.
 
 Two further optimisations are deliberately not implemented:
 
