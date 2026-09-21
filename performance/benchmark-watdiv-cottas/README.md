@@ -1,18 +1,11 @@
-# Benchmark WatDiv COTTAS
+# Benchmark WatDiv COTTAS (scale 10)
 
-This internal package benchmarks Comunica COTTAS using the [WatDiv](https://dsg.uwaterloo.ca/watdiv/) benchmark.
+This package follows the upstream Comunica WatDiv benchmark with automatic RDF-to-COTTAS conversion.
 
-Compare your current version of Comunica locally with the latest published release by running `npm run performance` from within this package.
-This will output a file called `plot_queries_data.svg` that visualizes the performance differences.
+```bash
+yarn workspace benchmark-watdiv-cottas performance:ci
+```
 
-If you only want to check the performance of your current version of Comunica,
-you can run `npm run performance:ci` instead,
-which is what the CI will run as well for continuous performance measurements.
+No COTTAS file needs to be provided. `performance:prepare` obtains the WatDiv RDF input and queries, then converts `generated/dataset.nt` to `generated/dataset.cottas` with pinned pycottas tooling. `performance:run` measures the current engine and rejects query failures. The optional `performance` command compares against the published Docker image.
 
-Continuous performance results are tracked on https://github.com/comunica/comunica-performance-results.
-
-## Required COTTAS asset
-
-Benchmark execution is intentionally opt-in until the COTTAS tooling project supplies a reproducible benchmark-scale writer policy. Generate or fetch the WatDiv RDF input with JBR, convert it with the agreed `pycottas` or `cottas-rs` workflow, and place the result at `generated/dataset.cottas`. The pre-performance check stops immediately with this path when the asset is absent.
-
-Record the writer version, source dataset checksum, selected COTTAS index/order, Parquet compression settings, and output checksum with every benchmark run. Once this workflow is fixed and automated, enable the performance CI job described in `COTTAS_IMPLEMENTATION_CHECKLIST.md`.
+See [the benchmark guide](../README.md) for writer settings, file provenance, PR/base comparisons, and verification status.

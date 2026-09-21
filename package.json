@@ -12,7 +12,7 @@
     "build-changed": "lerna run build --since HEAD",
     "test": "jest",
     "test-ci": "jest --ci --maxWorkers=4 --coverage",
-    "verify": "yarn run build && yarn run test-ci && yarn run lint && yarn run depcheck && yarn workspace benchmark-bsbm-cottas validate && yarn workspace benchmark-watdiv-cottas validate",
+    "verify": "yarn run build && yarn run test-ci && yarn run lint && yarn run depcheck && yarn run test-performance && yarn run doc",
     "lint": "eslint . --cache",
     "clean": "rm -rf ./node_modules && rm -rf ./packages/*/node_modules",
     "depcheck": "depcheckTask @comunica/config-query-sparql-cottas",
@@ -30,7 +30,8 @@
     "publish-canary": "yarn run build && lerna version prerelease --preid alpha.$(node_modules/@comunica/utils-monorepo/sh/get-next-alpha-version.sh @comunica/query-sparql-cottas) --exact --ignore-scripts --force-publish --no-push --no-git-tag-version --yes && git update-index --assume-unchanged $(git ls-files | tr '\\n' ' ') && lerna publish from-package --no-git-reset --pre-dist-tag next --force-publish --no-push --no-git-tag-version --yes && git update-index --no-assume-unchanged $(git ls-files | tr '\\n' ' ') && git checkout .",
     "doc": "node_modules/@comunica/utils-monorepo/sh/typedoc-json.sh create && typedoc && node_modules/@comunica/utils-monorepo/sh/typedoc-json.sh remove",
     "postinstall": "yarn run build && lerna run prepare",
-    "version": "manual-git-changelog onversion"
+    "version": "manual-git-changelog onversion",
+    "test-performance": "node --test performance/tests/*.test.js && yarn workspace benchmark-bsbm-cottas validate && yarn workspace benchmark-bsbm-cottas-10k validate && yarn workspace benchmark-watdiv-cottas validate && yarn workspace benchmark-watdiv-cottas-100 validate"
   },
   "devDependencies": {
     "@babel/core": "^8.0.0",
@@ -59,6 +60,7 @@
     "rdf-data-factory": "^2.0.2",
     "rdf-quad": "^2.0.0",
     "rdf-test-suite-ldf": "^2.0.1",
+    "sparql-benchmark-runner": "^5.1.0",
     "stream-to-string": "^1.1.0",
     "streamify-array": "^2.0.0",
     "streamify-string": "^1.0.1",
@@ -74,6 +76,7 @@
     "test"
   ],
   "resolutions": {
+    "**/sparql-benchmark-runner/fetch-sparql-endpoint": "7.1.1",
     "rdf-parse": "5.0.0"
   }
 }

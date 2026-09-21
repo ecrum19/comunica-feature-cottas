@@ -15,6 +15,10 @@
 
 ## Bugs
 
+> **Status:** both are fixed on branch `fix-term-matching` (`c60ebd1`). Verification is in
+> "Confidence in the C1/C2 fix" below. C1 is fixed for the encodings that RDF itself calls
+> equivalent; escapes originating in the file remain out of scope by design.
+
 ### 🔴 C1 — Constant pushdown does raw string equality → silent missing results
 
 `CottasDocument.serializeTerm` serialises the query constant with N3's N-Triples writer, then does `o = $term` in SQL. Any **legal but non-canonical** N-Triples encoding in the file decodes fine on read but can *never* be matched by a constant.
@@ -188,6 +192,286 @@ The `scaling.cjs` "effect of page size" table still reads ~5.2 s at every `maxBu
 
 ---
 
+## Benchmark workflow — VM validation (branch `benchmark-workflow`)
+
+Run on **vcf-bench-1** and **vcf-bench-2** (each 8 cores, 31 GB, Ubuntu, Docker 29.7.2), Node 26.9.0,
+from a clean checkout of commit `7782bbd` in `~/cottas-bench-test`. Existing VM data untouched.
+
+### Works
+
+| Step | Result |
+|---|---|
+| `yarn install --frozen-lockfile --ignore-engines` | ✅ 59 s |
+| `yarn run test-performance` | ✅ 9/9 script tests + 4 JBR config validations |
+| WatDiv-10 `performance:prepare` | ✅ **47 s** — checksum-verified asset fetch, JBR prepare, Docker image build, pycottas conversion |
+| WatDiv-10 `performance:run` | ✅ **30.4 min**, exit 0, 0 query errors, `check-results.js` passed |
+| BSBM-1k `performance:ci` (vcf-bench-2) | ✅ **25.0 min**, exit 0, after the timeout fix below |
+| WatDiv-100 `performance:prepare` (vcf-bench-1) | ✅ **134 s** — 10,930,937 triples, 1.5 GB generated |
+| WatDiv-100 `performance:run` | ❌ **failed after 7 h 36 min** — C2 exceeded even `-t 1800` |
+| BSBM-10k `performance:prepare` | ✅ **135 s** — 3,564,773 triples, 931 MB generated |
+| BSBM-10k `performance:run` | ✅ **85 min**, exit 0, 0 errors |
+
+Conversion output is sound: 152 MB `dataset.nt` → **4.76 MB `dataset.cottas`** (32× smaller) for
+1,079,876 triples, with `dataset.cottas.json` recording pycottas 1.1.0 / duckdb 1.4.3 / pyoxigraph
+0.3.18 versions, the SPO+ZSTD-22+Parquet-v2 policy, the triple count, and both SHA-256 digests.
+
+### Measurements — WatDiv scale 10, 100 query instances × (1 warmup + 3 replications)
+
+20 metrics, **sum of medians 89.0 s**. Two templates are 78% of that:
+
+| Template | Median | Rows returned |
+|---|---:|---:|
+| C3 | 40.1 s | 244,010 |
+| C2 | 30.0 s | 0 |
+| C1 | 5.8 s | 0 |
+| F2/F3 | ~1.2 s | 3 / 4 |
+| everything else | < 1 s | small |
+
+**Seven of twenty templates (C1, C2, F1, S3, S4, S5, S7) return zero rows on every instantiation**,
+with `error=false`. I checked this against DuckDB rather than assuming: for S3, 162 subjects are in
+`ProductCategory8` but none carries all of `caption` + `hasGenre` + `publisher`, so **0 is the
+correct answer**. The WatDiv instantiations are simply selective — not an engine defect. It does
+mean a large part of the suite measures empty-result latency rather than result throughput.
+
+### BSBM-1k failed, then passed: the endpoint timeout was too short
+
+**Resolved.** With `-t 500` the benchmark completes in **25.0 min**, exit 0, 12 metrics and a
+37.9 s sum of medians. BSBM query 5 dominates at **27.0 s** — which is exactly why the old 60 s
+default bit: its slower instances crossed the ceiling.
+
+The original failure:
+
+BSBM ran 359 queries, then:
+
+```
+Worker … timed out for query 360.
+Shutting down worker … with 1 open connections.
+Worker … died with 15. Starting new worker.
+```
+
+BSBM's Java test driver does not tolerate the restart window — it got `Connection refused`, aborted,
+and left no `single.xml`, so the whole run errored and `check-results.js` never ran.
+
+Root cause was a config inconsistency, not a crash: WatDiv's hook passes `-t 500`, **BSBM's passed no
+`-t` at all**, so it inherited `HttpServiceSparqlEndpoint`'s default of `60_000` ms. One query over
+60 s killed the run.
+
+Worth knowing: `comunica-feature-hdt` also passes no `-t` on **either** of its BSBM benchmarks, so
+adding it here is a deliberate divergence rather than a parity fix — HDT is simply fast enough that
+the 60 s default never bites. A single slow query still costs the entire BSBM run rather than one
+measurement, which is a fragility in BSBM's Java driver, not something this repo controls.
+
+### The 10x benchmarks: measured at last
+
+Both prepare quickly and correctly. The timing runs are a different story.
+
+| | WatDiv-100 | BSBM-10k |
+|---|---:|---:|
+| triples | 10,930,937 | 3,564,773 |
+| prepare | 134 s | 135 s |
+| run (head engine only) | **27,379 s = 7 h 36 min** ❌ | **5,105 s = 85 min** ✅ |
+| metrics / sum of medians | 20 / 945.0 s | 12 / 155.5 s |
+| slowest template | C3 **538.4 s** (425,591 results) | query 5 **139.3 s** |
+| errors | **6 of 100 instances** | 0 |
+
+**WatDiv-100 failed, and `check-results.js` was right to fail it.** Two distinct errors:
+
+- **C2 errored on all five instantiations with `terminated`** — the endpoint worker was killed, i.e.
+  it blew through even the raised 1800 s ceiling. At scale 10 that same template returns **zero
+  rows in 30 s**; at scale 100 it cannot finish in half an hour. Five instances × four rounds at up
+  to 1800 s each is most of the 7.6 hours.
+- **One C3 instance failed to parse its response** (`Unexpected "!" at position 0 in state STOP`).
+  The other four C3 instances succeeded at ~538 s each, returning 425,591 rows. Most likely
+  collateral from the C2 worker being killed and restarted mid-response — the timing lines up — but
+  that is inference, not proof, and worth confirming if WatDiv-100 is ever enabled.
+
+Scaling is not linear and not uniform: BSBM query 5 went 27.0 s → 139.3 s (5.2x) for 10x the data,
+while WatDiv C3 went 40.1 s → 538.4 s (13.4x) and C2 went from finishing to not finishing at all.
+
+### Verdict on CI feasibility
+
+`timeout-minutes: 120` per matrix job, and a pull request runs base *and* head sequentially:
+
+| Benchmark | Head only | PR (base + head) | Fits a 120 min job? |
+|---|---:|---:|---|
+| BSBM-1k | 25 min | ~50 min | ✅ yes |
+| WatDiv-10 | 30 min | ~61 min | ✅ yes |
+| BSBM-10k | 85 min | ~170 min | ⚠️ master-only, not PRs |
+| WatDiv-100 (baseline) | 456 min | ~15 h | ❌ no, by 3.8x |
+| WatDiv-100 (with cache) | 242 min | ~8 h | ❌ no, by 2.0x |
+
+And these were measured on an 8-core / 31 GB VM; a standard GitHub-hosted runner has roughly half
+the cores, so treat every figure as optimistic.
+
+**Recommendation:** ship the PR matrix with `watdiv-cottas` and `bsbm-cottas` only. Move
+`bsbm-cottas-10k` to `master` pushes or a schedule. `WatDiv-100` should not be enabled anywhere
+until C2 is dealt with — either fixed, or excluded from that scale.
+
+**This changed the case for the deferred `countPattern` cache**, which has since been implemented
+and measured — see "Cardinality cache" below. C2 is the exact shape it addresses: a query that
+reads almost nothing and spends its time re-probing cardinality.
+
+### Where the query time actually goes
+
+Profiling WatDiv C2 (30 s, 0 solutions) by counting every adapter call:
+
+| | calls |
+|---|---:|
+| `countPattern` (exact `COUNT(*)`, one Parquet scan each) | **11,294** |
+| `searchBindings` (paged reads) | 338 |
+| rows actually fetched | 1,589 |
+
+The engine issues roughly **seven cardinality probes per row it ends up reading**. Page size is not
+the lever — see below — the duplicated `COUNT(*)` probes are (finding D3).
+
+### Issues found
+
+- 🔴 **Page size will not fix the benchmark runtime.** Measured on WatDiv C2: `pageSize` 128 →
+  31.0 s, 65536 → 30.1 s. A 512× change moves the query by 3%, because only 1,589 rows are read in
+  total across 338 calls. Memoizing `countPattern` per distinct pattern instead took the same query
+  from **30.0 s to 13.0 s (2.3×)** with identical results, serving 9,109 of 11,294 probes from cache.
+  A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per
+  pattern is safe; it needs a bounded LRU (one query produced 2,185 distinct patterns).
+- ✅ **Fixed:** BSBM's endpoint hook now passes `-t 500`, matching WatDiv, in both `benchmark-bsbm-cottas` and `benchmark-bsbm-cottas-10k`.
+- 🔴 **A failed run leaves a Docker network behind that blocks the next one.** The aborted BSBM run
+  left `jbr-experiment-…-bsbm-network`; the retry died in 2.7 s with
+  `409 … network with name … already exists`. CI's cleanup step is
+  `docker ps -aq | xargs -r docker rm -f`, which removes **containers only**, so the same failure
+  would strand a runner that reuses state or a rerun of a failed job. Add
+  `docker network ls --filter name=jbr -q | xargs -r docker network rm` alongside it.
+- 🔴 **The 120-minute CI timeout will not hold.** WatDiv-10 alone took 30.4 min for the head engine.
+  On a pull request the job runs base *and* head sequentially, so that benchmark is already ~61 min
+  of the 120-minute budget before WatDiv-100 or BSBM-10k are considered. WatDiv-100 is ten times the
+  data. Either raise `timeout-minutes`, cut `queryRunnerReplication`, or split the matrix further.
+- 🟠 **`libatomic1` is an undocumented prerequisite.** Node 26 will not start on a stock Ubuntu image
+  without it (`error while loading shared libraries: libatomic.so.1`). Needs
+  `sudo apt-get install -y libatomic1`; `ubuntu-latest` on GitHub Actions already has it, so this
+  only bites on a VM. Worth a line wherever the Node requirement is stated.
+- 🟡 **`performance:run` is not idempotent against a stale endpoint.** Port 3001 must be free; a
+  leftover endpoint from an interrupted run makes the next one measure the wrong engine silently.
+  A pre-flight port check in `performance:run` would be cheap insurance.
+
+### Not yet validated
+
+WatDiv-100 and BSBM-10k (the large-dataset conversion path, and the main memory/disk risk), and the
+PR/base comparison path including `summarize-results.js --compare` against real artifacts. The
+unit tests cover the comparison arithmetic and the 150% threshold, but not a real two-checkout run.
+
+---
+
+## Cardinality cache — implemented and measured (branch `cache-cardinality`)
+
+Implemented on `cache-cardinality` (branched from `fix-term-matching`, so the cache key accounts
+for `unionDefaultGraph` — cardinality differs with it). A bounded LRU of **pending** promises, so
+the concurrent duplicate probes a bind join produces collapse onto one query; failed lookups are
+dropped so the next caller retries; cleared on close; 65,536 entries. 94 tests, 100% coverage.
+
+Measured directly against the WatDiv-100 dataset (10.9M triples), driving the engine without an
+HTTP endpoint so nothing is capped by a worker timeout. Instance 0 unless noted:
+
+| query | no cache | cache, key via `serializeTerm` | cache, cheap key |
+|---|---:|---:|---:|
+| **C2** (0 solutions, 96,052 probes) | 513.5 s | 157.0 s | **134.5 s** → **3.8x** |
+| **C3** (425,591 solutions, 199,691 probes) | 593.2 s | 640.0 s | **548.5 s** → **1.08x** |
+
+C2 instances 0, 1 and 2 are identical at 134.5 / 134.1 / 134.2 s. Solution counts match the
+uncached run exactly, so the cache does not change results.
+
+**The middle column is why this was worth measuring rather than assuming.** The first
+implementation built its key by serializing each bound term, repeating work `patternSql` already
+does. On C3 — miss-heavy, 199,691 probes with few repeats — that cost **8% more than not caching at
+all**. Spelling the term out directly instead (value, language, datatype) turned the same query
+into a 7.5% gain. A cache that helps duplicate-heavy queries can quietly tax miss-heavy ones, and
+only C3 would have caught it.
+
+### The full matrix, re-run against the cache
+
+Same VM, same COTTAS file, same `-t 1800`. **WatDiv-100 now passes.**
+
+| | baseline | with cache |
+|---|---:|---:|
+| outcome | ❌ failed | ✅ **exit 0** |
+| wall clock | 27,379 s (7 h 36 min) | **14,514 s (4 h 02 min)** — 1.89x |
+| sum of medians | 945.0 s | **685.9 s** — 1.38x |
+| errored instances | 6 of 100 | **0** |
+
+Per template:
+
+| | baseline | cached | |
+|---|---:|---:|---:|
+| C2 | terminated at 1800 s | **53.4 s** | now finishes |
+| C3 | 538.4 s | 550.6 s | 0.98x |
+| S5 | 139.5 s | 23.3 s | 6.00x |
+| C1 | 94.1 s | 15.8 s | 5.95x |
+| S3 | 22.8 s | 4.5 s | 5.05x |
+| F4 | 61.2 s | 15.1 s | 4.04x |
+
+Excluding C3, which is miss-heavy and unchanged, the remaining templates went from 406.6 s to
+135.3 s — a **3.0x** improvement. C3 alone now accounts for 80% of the total.
+
+Two things this settles:
+
+- **The endpoint gap resolves in the cache's favour.** C2 measured 134 s standalone but comes in at
+  **53.4 s** through the endpoint, faster still — because the endpoint holds one source across
+  warmup and all three replications, so later rounds meet an already-populated cache. The earlier
+  standalone figures were the pessimistic case.
+- **The C3 parse error is gone.** That supports, without proving, the earlier guess that it was
+  collateral from the C2 worker being killed mid-response: no termination, no parse error.
+
+**CI feasibility is unchanged for this benchmark.** 242 min for the head engine alone is still
+double the 120-minute job timeout, and a pull request would be ~8 h. WatDiv-100 is now a *valid*
+benchmark that can be trusted on a VM or a schedule; it is still not a CI job.
+
+### Correction to the earlier reading
+
+The section above said WatDiv-100's C2 "cannot finish in half an hour" and inferred it was
+effectively unbounded. **That inference was wrong.** Uncached and uncapped, C2 instance 0 completes
+in **513.5 s**, well inside the 1800 s the benchmark allowed. What is true is only what was
+observed: the benchmark terminated all five C2 instantiations at the endpoint's 1800 s ceiling.
+
+So something about the endpoint path is at least 3.5x slower than driving the engine directly, and
+that gap is **not yet explained**. That gap has since been resolved by the full re-run above, which
+shows the endpoint path is *faster* than the standalone figures once its cache stays warm.
+
+## Confidence in the C1/C2 fix
+
+**C2 — high.** The change is small and mirrors Comunica's own `QuerySourceRdfJs` semantics
+(default-graph patterns and graph variables both widen). Covered by adapter, source, and engine
+tests, and the original reproduction (`unionDefaultGraph: true` over a quad file) went from 2
+solutions to the correct 5. There is no unbounded input class left unhandled.
+
+**C1 — high for the cases it targets, deliberately partial overall.**
+
+Fixed and verified: `xsd:string` vs simple literals, language-tag case, and N3's astral/control
+escapes against raw storage. Each is a closed set of encodings, matched by an `IN` list or a
+`starts_with` + `lower()` pair, so there is no "mostly works" middle ground — either the encoding
+is in the set or it is not.
+
+*Not* fixed: escapes that originate in the **file** (`<urn:caf\u00E9>`). That set is unbounded, so
+no pushdown predicate can cover it; the only complete fix is normalising the column, which costs
+the pushdown. The format contract stays canonical N-Triples, which both reference writers produce.
+
+What the confidence rests on:
+
+| Evidence | Result |
+|---|---|
+| Unit tests | 86 passing, 100% statement/branch/function/line |
+| Report's own reproduction harness (terms) | 10/14 → **12/14**; the 2 remaining are the file-side escapes |
+| Report's own reproduction harness (graphs/terms) | 22/27 → **24/27**; the 3 remaining are upstream Comunica or wrong expectations in the harness |
+| Real genome data, test-1k (94,919 triples) | **32/32** vs DuckDB ground truth, incl. exact md5 of the full scan |
+| Real genome data, test-10k (958,919 triples) | **32/32** vs DuckDB ground truth |
+
+The genome runs are the ones that rule out a false-positive regression: `object-plain-literal-pushdown`
+now matches two encodings instead of one, and still returns exactly DuckDB's 2,473 rows, so the
+widened predicate does not over-match on real data.
+
+Residual risk is low but not zero: the language predicate relies on `starts_with` pinning the
+lexical form so that `lower()` can only vary the tag. That reasoning holds for any lexical form —
+including one containing `"@` — because the prefix is built by length from the serialization rather
+than by parsing, but it is the one part of the change worth a second reviewer's eye.
+
+---
+
 ## Suggested priority
 
 1. ~~**D1** — paging~~ ✅ **done** (see "Fix applied"). 17× on a 959k-triple scan; HG005 `LIMIT 10000` went from a 5-minute timeout to 14.9 s.
@@ -195,6 +479,66 @@ The `scaling.cjs` "effect of page size" table still reads ~5.2 s at every `maxBu
 3. Add a **> 128-row fixture** to the unit suite. The fix added three page-ramp tests against the mock, but there is still no *real* multi-page Parquet fixture in the repo.
 4. C2, D4, D6 are small.
 5. If genome-scale reads matter more later, the next step beyond `pageSize` is a real DuckDB streaming cursor per iterator — that would also fix the deep-`OFFSET` case, which `pageSize` does not help.
+6. Give BSBM's endpoint hook the same explicit `-t` as WatDiv's; without it one slow query aborts the whole benchmark.
+7. Cache `countPattern` per pattern behind a bounded LRU (D3). Measured 2.3x on WatDiv C2, and it is the only lever that moves the benchmark runtime — page size does not. **Deliberately deferred**; tracked under "Future optimizations" in `COTTAS_IMPLEMENTATION_CHECKLIST.md`.
+8. Raise the benchmark CI timeout before enabling the matrix on pull requests.
+
+---
+
+## Before a PR to the Comunica organisation
+
+What changes when this leaves a personal fork and CI actually executes.
+
+### Blocking
+
+1. **Repository ownership.** CI already targets `comunica/` Docker Hub, the
+   `comunica/comunica-performance-results` repo, Coveralls, and the `@comunica/*` npm scope, and the
+   packages already claim those names. None of it works from `ecrum19/`. Secrets needed on the org
+   repo: `DOCKER_USERNAME`, `DOCKER_PASSWORD`, `PAT` (plus the automatic `github_token`).
+   Credit where due: historical publishing is already guarded on
+   `github.repository == 'comunica/comunica-feature-cottas'` **and** `secrets.PAT != ''`, so it
+   degrades cleanly on a fork rather than failing.
+2. **The large benchmarks are being measured now.** `benchmark-watdiv-cottas-100` and
+   `benchmark-bsbm-cottas-10k` were wired into the CI matrix having only ever been config-validated.
+   WatDiv-100 preparation now works (10,930,937 triples, 134 s, 1.5 GB); the timing runs are in
+   flight on vcf-bench-1 with `-t 1800`. Do not enable these jobs in shared CI until those numbers
+   exist — that remains the single biggest risk in this change.
+3. **The 120-minute job timeout is probably too small.** Measured: WatDiv-10 took **30.4 min** for
+   the head engine alone on an 8-core/31 GB VM. A pull request runs base *and* head, so that is
+   ~61 min — on a GitHub-hosted runner with roughly half the cores. That fits inside its own
+   120-minute matrix job, but scale 100 has ten times the data (C3 alone returned 244k rows at
+   scale 10) and will not. Measure, then raise `timeout-minutes`, cut `queryRunnerReplication`, or
+   drop the 10x jobs from PR runs and keep them on `master` only.
+4. **Docker network cleanup** (see "Issues found") — one line, but it strands reruns after any failure.
+
+### Worth doing first
+
+5. **Merge the two branches.** `benchmark-workflow` and `fix-term-matching` merge cleanly with no
+   conflicts (verified with a trial merge); there is nothing to reconcile by hand.
+6. **Disk headroom.** A PR run holds two checkouts (1.1 GB each, of which 849 MB is `node_modules`),
+   the 513 MB converter image, the BSBM generator image, plus generated data — 146 MB of N-Triples
+   at WatDiv scale 10, so roughly 1.5 GB at scale 100. Comfortable on the VM, tight on a
+   standard hosted runner.
+7. **Dead `integration` script.** `engines/query-sparql-cottas` still points at
+   `…/manifest-ldf-tests/sparql-cottas/cottas-manifest.ttl`, which **404s**. CI does not invoke it
+   (the step is `if: ${{ false }}`), so it blocks nothing — but either author that manifest in
+   `comunica/manifest-ldf-tests` or drop the script rather than shipping a broken one.
+
+### Parity with `comunica-feature-hdt`
+
+8. **Versioning.** `lerna.json` is `5.3.0` with every package pinned to `^5.3.0`, conflating this
+   feature's release train with Comunica's. HDT sits at its own `5.0.1` while depending on Comunica
+   `^5.4.0`. Reset to an honest starting version before the first tag.
+9. **Changelog format.** `CHANGELOG.md` is a hand-written block; the `version` script is
+   `manual-git-changelog onversion`, which expects HDT's per-version anchor format.
+10. **Remove the three `COTTAS_IMPLEMENTATION_*.md` files.** They are build-process artefacts with no
+    HDT counterpart. Anything durable belongs in `CHANGELOG.md` or the package READMEs. Doing so also
+    lets the `COTTAS_IMPLEMENTATION_PLAN.md` entries come out of `eslint.config.js` and `.eslintignore`.
+11. **`yarn.lock`.** HDT ships none and runs a plain `yarn install`. Keeping it is defensible, but
+    `--ignore-engines` in CI is currently masking that `yarn install` fails on Node 22.20.0 while the
+    README promises "Node.js 22 or newer" (D6). Fix the claim either way.
+12. **README badges and the actor's Config Parameters list** — the latter now exists; the CI,
+    Coveralls, npm and Docker Hub badges only become meaningful after step 1.
 
 ---
 

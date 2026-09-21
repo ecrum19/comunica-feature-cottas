@@ -56,11 +56,20 @@ This checklist turns `COTTAS_IMPLEMENTATION_PLAN.md` into verifiable work items.
 ## Phase 6 — Performance benchmarks
 
 - [x] Keep BSBM and WatDiv runner definitions structurally aligned with the HDT feature repository.
-- [x] Fail clearly when a generated `.cottas` benchmark asset is absent.
-- [ ] Add and validate a reproducible large-dataset COTTAS asset generator.
-- [ ] Run the benchmark matrix and enable the performance CI job.
+- [x] Automatically prepare RDF inputs and convert them with the pinned pycottas reference writer.
+- [x] Add WatDiv 100 and BSBM 10k and enable the performance matrix with PR/base comparisons.
+- [x] Verify conversion on the WatDiv 10 and BSBM 1k inputs and record file provenance.
+- [ ] Complete all four timing runs, large-dataset conversion, and PR/base comparisons on a VM or CI.
 
-The last two benchmark tasks are deferred because the query feature only consumes COTTAS files; a benchmark-scale writer and its compression/index policy should be supplied by the COTTAS tooling project, not improvised in the hot-path reader. The existing runners remain opt-in and fail with exact asset-placement instructions.
+See [performance/README.md](performance/README.md) for the converter policy and validation status, and `COTTAS_REVIEW_AND_E2E_REPORT.md` for the measurements taken so far.
+
+## Future optimizations
+
+Deliberately not implemented; recorded here so the measurements are not lost.
+
+- [ ] Cache `CottasDocument.countPattern` per distinct pattern behind a bounded LRU. Every `CottasIterator` issues one exact `COUNT(*)` from its constructor, and bind joins create one iterator per binding, so patterns are re-counted many times over. Profiling WatDiv C2 (30 s, 0 solutions) recorded **11,294 `countPattern` calls against 338 paged reads for 1,589 rows**; memoizing them took the query to **13.0 s (2.3x)** with identical results and 9,109 of 11,294 probes served from cache. A COTTAS document is a read-only local file for its whole lifetime, so caching cardinality per pattern is sound. One query produced 2,185 distinct patterns, so the cache needs a size bound.
+- [ ] Use more than one DuckDB connection per document. All operations are serialized on a single connection, so concurrent triple patterns in a join cannot overlap.
+- [ ] Replace LIMIT/OFFSET paging with a DuckDB streaming cursor per iterator. `pageSize` already removed the quadratic full-scan cost, but a deep explicit `OFFSET` still has to skip every preceding row.
 
 ## Phase 7 — Documentation and changelog
 

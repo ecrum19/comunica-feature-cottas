@@ -79,6 +79,8 @@ module.exports = config([
       '**/engine-browser.js',
       '**/comunica-browser.js',
       '.github/**',
+      'performance/**/generated/**',
+      'performance/**/output/**',
       '**/bintest/**',
       'COTTAS_IMPLEMENTATION_PLAN.md',
       'lerna.json',

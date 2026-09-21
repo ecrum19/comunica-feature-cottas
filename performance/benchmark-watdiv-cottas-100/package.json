@@ -1,0 +1,21 @@
+{
+  "name": "benchmark-watdiv-cottas-100",
+  "version": "5.3.0",
+  "private": true,
+  "scripts": {
+    "jbr": "cross-env NODE_OPTIONS=--max-old-space-size=8192 jbr",
+    "validate": "jbr validate",
+    "fetch-assets": "node ../scripts/fetch-watdiv-assets.js 100",
+    "performance": "docker pull comunica/query-sparql-cottas:latest && yarn run performance:prepare && jbr prepare -c 1 && jbr run && node ../scripts/check-results.js combinations/combination_0/output combinations/combination_1/output && psbr tex query combinations/combination_*/output --svg --logY --overrideCombinationLabels Current,Previous",
+    "performance:ci": "yarn run performance:prepare && yarn run performance:run",
+    "performance:prepare": "yarn run fetch-assets && jbr prepare -c 0 && node ../scripts/convert-cottas.js",
+    "performance:run": "jbr run -c 0 && node ../scripts/check-results.js combinations/combination_0/output"
+  },
+  "dependencies": {
+    "@jbr-experiment/watdiv": "^6.0.0",
+    "@jbr-hook/cli": "^6.0.0",
+    "@jbr-hook/sparql-endpoint-comunica": "^6.0.0",
+    "cross-env": "^10.0.0",
+    "jbr": "^6.0.0"
+  }
+}
