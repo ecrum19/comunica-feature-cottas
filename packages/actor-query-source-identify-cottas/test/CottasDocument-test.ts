@@ -21,6 +21,7 @@ describe('CottasDocument', () => {
   let invalidTermPath: string;
   let nullTermPath: string;
   let encodingsPath: string;
+  let indexedPath: string;
 
   beforeAll(async() => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'comunica-cottas-test-'));
@@ -32,6 +33,7 @@ describe('CottasDocument', () => {
     invalidTermPath = join(temporaryDirectory, 'invalid-term.cottas');
     nullTermPath = join(temporaryDirectory, 'null-term.cottas');
     encodingsPath = join(temporaryDirectory, 'encodings.cottas');
+    indexedPath = join(temporaryDirectory, 'indexed.cottas');
 
     await createParquet(triplePath, 's VARCHAR, p VARCHAR, o VARCHAR', [
       [ '<urn:s1>', '<urn:p>', '"hello"@en' ],
@@ -73,6 +75,20 @@ describe('CottasDocument', () => {
       [ '<urn:raw-control>', '<urn:control>', `"x${String.fromCodePoint(1)}"` ],
       [ '<urn:escaped-control>', '<urn:control>', '"x\\u0001"' ],
     ]);
+    // The same three triples in three row orders, as the benchmark converter emits them.
+    const triples: unknown[][] = [
+      [ '<urn:s1>', '<urn:p2>', '<urn:o1>' ],
+      [ '<urn:s2>', '<urn:p1>', '<urn:o9>' ],
+      [ '<urn:s3>', '<urn:p1>', '<urn:o5>' ],
+    ];
+    const by = (...order: number[]): unknown[][] =>
+      [ ...triples ].sort((a, b) => order
+        .map(i => String(a[i]).localeCompare(String(b[i])))
+        .find(comparison => comparison !== 0) ?? 0);
+    const spo = 's VARCHAR, p VARCHAR, o VARCHAR';
+    await createParquet(indexedPath, spo, by(0, 1, 2));
+    await createParquet(join(temporaryDirectory, 'indexed.posg.cottas'), spo, by(1, 2, 0));
+    await createParquet(join(temporaryDirectory, 'indexed.ospg.cottas'), spo, by(2, 0, 1));
   });
 
   afterAll(async() => {
@@ -392,6 +408,103 @@ describe('CottasDocument', () => {
       { offset: 0, limit: 1 },
     )).rejects.toThrow('non-string or null \'s\'');
     await document.close();
+  });
+
+  describe('index selection', () => {
+    it('answers each pattern shape from the index whose leading components are bound', async() => {
+      const document = await openCottasDocument(indexedPath, DF);
+      const used: string[] = [];
+      const real = (<any> document).connection.runAndReadAll.bind((<any> document).connection);
+      jest.spyOn((<any> document).connection, 'runAndReadAll').mockImplementation((...args: any[]) => {
+        used.push(String(args[1].path).replace(`${temporaryDirectory}/`, ''));
+        return real(...args);
+      });
+
+      const S = DF.namedNode('urn:s1');
+      const P = DF.namedNode('urn:p1');
+      const O = DF.namedNode('urn:o5');
+      const v = DF.variable('v');
+      for (const pattern of <[RDF.Term, RDF.Term, RDF.Term][]>[
+        [ S, v, v ],
+        [ v, P, v ],
+        [ v, v, O ],
+        [ S, P, v ],
+        [ v, P, O ],
+        [ O, v, v ],
+        [ v, v, v ],
+      ]) {
+        await document.countPattern(...pattern);
+      }
+      expect(used).toEqual([
+        'indexed.cottas', // S bound
+        'indexed.posg.cottas', // P bound
+        'indexed.ospg.cottas', // O bound
+        'indexed.cottas', // S and p bound
+        'indexed.posg.cottas', // P and o bound
+        'indexed.cottas', // O as a subject term still binds s
+        'indexed.cottas', // Nothing bound, primary
+      ]);
+      await document.close();
+    });
+
+    it('returns the same solutions whichever index answers the pattern', async() => {
+      const document = await openCottasDocument(indexedPath, DF);
+      const subjectsFor = async(pattern: [RDF.Term, RDF.Term, RDF.Term]): Promise<string[]> => {
+        const { bindings } = await document.searchBindings(BF, ...pattern, DF.defaultGraph(), { offset: 0, limit: 10 });
+        return bindings.map(binding => binding.get(DF.variable('s'))!.value).sort();
+      };
+      await expect(subjectsFor([ DF.variable('s'), DF.namedNode('urn:p1'), DF.variable('o') ]))
+        .resolves.toEqual([ 'urn:s2', 'urn:s3' ]);
+      await expect(subjectsFor([ DF.variable('s'), DF.variable('p'), DF.namedNode('urn:o5') ]))
+        .resolves.toEqual([ 'urn:s3' ]);
+      await expect(document.countPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+      await document.close();
+    });
+
+    it('uses only the primary file when no sibling indexes are present', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const used: string[] = [];
+      const real = (<any> document).connection.runAndReadAll.bind((<any> document).connection);
+      jest.spyOn((<any> document).connection, 'runAndReadAll').mockImplementation((...args: any[]) => {
+        used.push(String(args[1].path));
+        return real(...args);
+      });
+      await document.countPattern(DF.variable('s'), DF.namedNode('urn:p'), DF.variable('o'));
+      expect(used).toEqual([ triplePath ]);
+      await document.close();
+    });
+
+    it('uses whichever sibling indexes happen to be present', async() => {
+      const primary = join(temporaryDirectory, 'partial.cottas');
+      const rows: unknown[][] = [[ '<urn:s1>', '<urn:p1>', '<urn:o1>' ], [ '<urn:s2>', '<urn:p2>', '<urn:o2>' ]];
+      await createParquet(primary, 's VARCHAR, p VARCHAR, o VARCHAR', rows);
+      // Only the object-ordered sibling exists; the predicate-ordered one does not.
+      await createParquet(join(temporaryDirectory, 'partial.ospg.cottas'), 's VARCHAR, p VARCHAR, o VARCHAR', rows);
+      const document = await openCottasDocument(primary, DF);
+      const used: string[] = [];
+      const real = (<any> document).connection.runAndReadAll.bind((<any> document).connection);
+      jest.spyOn((<any> document).connection, 'runAndReadAll').mockImplementation((...args: any[]) => {
+        used.push(String(args[1].path).replace(`${temporaryDirectory}/`, ''));
+        return real(...args);
+      });
+      await document.countPattern(DF.variable('s'), DF.variable('p'), DF.namedNode('urn:o2'));
+      await document.countPattern(DF.variable('s'), DF.namedNode('urn:p1'), DF.variable('o'));
+      // Object-bound uses the sibling; predicate-bound falls back to the primary.
+      expect(used).toEqual([ 'partial.ospg.cottas', 'partial.cottas' ]);
+      await document.close();
+    });
+
+    it('rejects a sibling index whose columns do not match', async() => {
+      const primary = join(temporaryDirectory, 'mismatch.cottas');
+      await createParquet(primary, 's VARCHAR, p VARCHAR, o VARCHAR', [[ '<urn:s>', '<urn:p>', '<urn:o>' ]]);
+      await createParquet(
+        join(temporaryDirectory, 'mismatch.posg.cottas'),
+        's VARCHAR, p VARCHAR, o VARCHAR, g VARCHAR',
+        [[ '<urn:s>', '<urn:p>', '<urn:o>', null ]],
+      );
+      await expect(openCottasDocument(primary, DF)).rejects.toThrow('but the primary file has');
+    });
   });
 
   describe('cardinality caching', () => {

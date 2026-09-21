@@ -14,6 +14,18 @@ const REQUIRED_COLUMNS = [ 's', 'p', 'o' ];
 const TERM_PREFIX = '<urn:comunica:cottas:subject> <urn:comunica:cottas:predicate> ';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 /**
+ * Index orders a COTTAS source may provide, most significant component first.
+ *
+ * Each is a complete COTTAS file differing only in row order. A pattern is answered from the order
+ * whose leading components are bound, so DuckDB can prune row groups on Parquet statistics instead
+ * of scanning. The first entry is the primary file; the others are optional siblings.
+ */
+const INDEX_ORDERS: { name: string; components: ('s' | 'p' | 'o')[] }[] = [
+  { name: 'spog', components: [ 's', 'p', 'o' ]},
+  { name: 'posg', components: [ 'p', 'o', 's' ]},
+  { name: 'ospg', components: [ 'o', 's', 'p' ]},
+];
+/**
  * Cardinality results kept per COTTAS document. Each entry is a short key and a small object, so
  * the bound costs a few megabytes at most; one WatDiv query produced ~2,200 distinct patterns.
  */
@@ -135,6 +147,7 @@ class DuckDBCottasDocument implements CottasDocument {
   public readonly hasGraphColumn: boolean;
 
   private readonly cottasPath: string;
+  private readonly indexPaths: Map<string, string>;
   private readonly connection: DuckDBConnection;
   private readonly dataFactory: ComunicaDataFactory;
   private readonly instance: DuckDBInstance;
@@ -148,8 +161,10 @@ class DuckDBCottasDocument implements CottasDocument {
     connection: DuckDBConnection,
     dataFactory: ComunicaDataFactory,
     hasGraphColumn: boolean,
+    indexPaths: Map<string, string>,
   ) {
     this.cottasPath = cottasPath;
+    this.indexPaths = indexPaths;
     this.instance = instance;
     this.connection = connection;
     this.dataFactory = dataFactory;
@@ -175,7 +190,7 @@ class DuckDBCottasDocument implements CottasDocument {
       }
       const reader = await this.connection.runAndReadAll(
         `SELECT count(*) AS count FROM read_parquet($path)${pattern.whereClause}`,
-        { path: this.cottasPath, ...pattern.values },
+        { path: this.indexFor(subject, predicate, object), ...pattern.values },
       );
       const count = reader.getRowObjectsJS()[0]?.count;
       /* istanbul ignore if -- DuckDB COUNT returns BIGINT through getRowObjectsJS. */
@@ -218,7 +233,7 @@ class DuckDBCottasDocument implements CottasDocument {
         `FROM read_parquet($path, file_row_number = true)${pattern.whereClause} ` +
         'ORDER BY file_row_number LIMIT $limit OFFSET $offset',
         {
-          path: this.cottasPath,
+          path: this.indexFor(subject, predicate, object),
           ...pattern.values,
           limit: options.limit,
           offset: options.offset,
@@ -393,6 +408,42 @@ class DuckDBCottasDocument implements CottasDocument {
     ].join('\n');
   }
 
+  /**
+   * Choose the index whose leading components are bound, longest prefix first.
+   *
+   * This is the selection rule used by nested-index triple stores such as rdf-stores.js: an order
+   * only helps while its components are bound from the front, because that is the prefix Parquet
+   * row-group statistics can prune on. A repeated variable is not a bound term.
+   */
+  private indexFor(subject: RDF.Term, predicate: RDF.Term, object: RDF.Term): string {
+    if (this.indexPaths.size === 0) {
+      return this.cottasPath;
+    }
+    const bound = new Set<string>();
+    for (const [ component, term ] of <[string, RDF.Term][]>[[ 's', subject ], [ 'p', predicate ], [ 'o', object ]]) {
+      if (term.termType !== 'Variable') {
+        bound.add(component);
+      }
+    }
+    let best = this.cottasPath;
+    let bestPrefix = -1;
+    for (const order of INDEX_ORDERS) {
+      const path = this.indexPaths.get(order.name);
+      if (!path) {
+        continue;
+      }
+      let prefix = 0;
+      while (prefix < order.components.length && bound.has(order.components[prefix])) {
+        prefix++;
+      }
+      if (prefix > bestPrefix) {
+        bestPrefix = prefix;
+        best = path;
+      }
+    }
+    return best;
+  }
+
   private patternSql(
     subject: RDF.Term,
     predicate: RDF.Term,
@@ -500,12 +551,23 @@ export async function openCottasDocument(
     if (invalidType) {
       throw new Error(`column '${String(invalidType.column_name)}' must be VARCHAR, not ${String(invalidType.column_type)}`);
     }
+    // Sibling files holding the same data in another row order are optional; a source with only
+    // the primary file keeps working exactly as before.
+    const indexPaths = new Map<string, string>([[ INDEX_ORDERS[0].name, cottasPath ]]);
+    for (const order of INDEX_ORDERS.slice(1)) {
+      const siblingPath = cottasPath.replace(/(\.[^./]*)?$/u, match => `.${order.name}${match}`);
+      if (await isReadableFile(siblingPath)) {
+        await assertSameSchema(connection, siblingPath, columnNames);
+        indexPaths.set(order.name, siblingPath);
+      }
+    }
     return new DuckDBCottasDocument(
       cottasPath,
       instance,
       connection,
       dataFactory,
       columnNames.includes('g'),
+      indexPaths.size > 1 ? indexPaths : new Map(),
     );
   } catch (error: unknown) {
     // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
@@ -513,6 +575,34 @@ export async function openCottasDocument(
     // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
     instance.closeSync();
     throw new Error(`Unable to open COTTAS file '${cottasPath}': ${errorMessage(error)}`);
+  }
+}
+
+async function isReadableFile(candidate: string): Promise<boolean> {
+  try {
+    return (await stat(candidate)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** A sibling index must hold the same columns, or it is not the same dataset. */
+async function assertSameSchema(
+  connection: DuckDBConnection,
+  siblingPath: string,
+  columnNames: string[],
+): Promise<void> {
+  const reader = await connection.runAndReadAll(
+    'DESCRIBE SELECT * FROM read_parquet($path)',
+    { path: siblingPath },
+  );
+  const schema = <ICottasSchemaRow[]> <unknown> reader.getRowObjectsJS();
+  const siblingColumns = schema.map(row => String(row.column_name));
+  if (siblingColumns.join(',') !== columnNames.join(',')) {
+    throw new Error(
+      `index '${siblingPath}' has columns ${siblingColumns.join(', ')} but the primary file has ${
+        columnNames.join(', ')}`,
+    );
   }
 }
 

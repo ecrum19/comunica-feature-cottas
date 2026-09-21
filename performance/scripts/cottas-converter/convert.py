@@ -1,4 +1,9 @@
-"""Convert JBR's N-Triples input with the reference COTTAS writer."""
+"""Convert JBR's N-Triples input with the reference COTTAS writer.
+
+Writes one COTTAS file per index order. Each is a complete, valid COTTAS file; they
+differ only in row order, which is what lets DuckDB prune row groups for a pattern
+whose leading components are bound.
+"""
 
 import hashlib
 import importlib.metadata
@@ -17,10 +22,17 @@ def checksum(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+# The primary file keeps the plain name so that a single-index consumer still works.
+INDEX_ORDERS = ("spog", "posg", "ospg")
+
+
+def target_for(directory, order):
+    return directory / ("dataset.cottas" if order == INDEX_ORDERS[0] else f"dataset.{order}.cottas")
+
+
 def convert(directory):
     directory = directory.resolve()
     source = directory / "dataset.nt"
-    target = directory / "dataset.cottas"
     manifest_path = directory / "dataset.cottas.json"
     policy = {
         "writer": "pycottas",
@@ -28,53 +40,63 @@ def convert(directory):
             name: importlib.metadata.version(name)
             for name in ("pycottas", "duckdb", "pyoxigraph", "pandas", "numpy")
         },
-        "index": "spo",
+        "indexes": list(INDEX_ORDERS),
         "compression": "ZSTD",
         "compressionLevel": 22,
         "parquetVersion": "v2",
         "sourceSha256": checksum(source),
     }
-    if target.is_file() and manifest_path.is_file():
+    targets = {order: target_for(directory, order) for order in INDEX_ORDERS}
+    if all(path.is_file() for path in targets.values()) and manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text())
+        digests = manifest.get("outputSha256", {})
         if all(manifest.get(key) == value for key, value in policy.items()) and \
-                manifest.get("outputSha256") == checksum(target):
-            print(f"Reusing verified COTTAS file: {target}", flush=True)
+                isinstance(digests, dict) and \
+                all(digests.get(order) == checksum(path) for order, path in targets.items()):
+            print(f"Reusing {len(targets)} verified COTTAS files in {directory}", flush=True)
             return
 
-    print(f"Converting {source} with pycottas (SPO, ZSTD level 22)", flush=True)
+    print(f"Converting {source} with pycottas ({', '.join(INDEX_ORDERS)}, ZSTD level 22)", flush=True)
     # pycottas uses a fixed database filename in disk mode. Keep it, spill files,
     # and partially written output in an isolated directory on the data volume.
     previous_directory = Path.cwd()
+    digests = {}
     with tempfile.TemporaryDirectory(prefix="cottas-", dir=directory) as temporary:
         try:
             os.chdir(temporary)
-            pycottas.rdf2cottas(str(source), "dataset.cottas", index="spo", disk=True)
-            converted = Path(temporary) / "dataset.cottas"
-            with duckdb.connect() as connection:
-                columns = connection.execute(
-                    "DESCRIBE SELECT * FROM read_parquet(?)", [str(converted)]
-                ).fetchall()
-                if [(column[0], column[1]) for column in columns] != [
-                    ("s", "VARCHAR"), ("p", "VARCHAR"), ("o", "VARCHAR")
-                ]:
-                    raise ValueError(f"Unexpected COTTAS benchmark schema: {columns}")
-                rows = connection.execute(
-                    "SELECT count(*) FROM read_parquet(?)", [str(converted)]
-                ).fetchone()[0]
-                if rows == 0:
-                    raise ValueError("The converted benchmark dataset is empty")
-            manifest = {
-                **policy,
-                "triples": rows,
-                "outputSha256": checksum(converted),
-            }
+            for order in INDEX_ORDERS:
+                name = f"{order}.cottas"
+                pycottas.rdf2cottas(str(source), name, index=order, disk=True)
+                converted = Path(temporary) / name
+                rows = validate(converted)
+                digests[order] = checksum(converted)
+                converted.replace(targets[order])
+                print(f"  {order}: {rows:,} triples -> {targets[order].name}", flush=True)
+            manifest = {**policy, "triples": rows, "outputSha256": digests}
             temporary_manifest = Path(temporary) / "dataset.cottas.json"
             temporary_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
-            converted.replace(target)
             temporary_manifest.replace(manifest_path)
         finally:
             os.chdir(previous_directory)
-    print(f"Prepared {rows:,} triples: {target}", flush=True)
+    print(f"Prepared {rows:,} triples across {len(INDEX_ORDERS)} index orders", flush=True)
+
+
+def validate(converted):
+    """Check the schema and return the triple count."""
+    with duckdb.connect() as connection:
+        columns = connection.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?)", [str(converted)]
+        ).fetchall()
+        if [(column[0], column[1]) for column in columns] != [
+            ("s", "VARCHAR"), ("p", "VARCHAR"), ("o", "VARCHAR")
+        ]:
+            raise ValueError(f"Unexpected COTTAS benchmark schema: {columns}")
+        rows = connection.execute(
+            "SELECT count(*) FROM read_parquet(?)", [str(converted)]
+        ).fetchone()[0]
+        if rows == 0:
+            raise ValueError("The converted benchmark dataset is empty")
+    return rows
 
 
 if __name__ == "__main__":

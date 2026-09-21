@@ -15,7 +15,7 @@ BSBM uses JBR's `vcity/bsbm:v1.0` generator, just as HDT does, to produce `gener
 
 After JBR preparation, `scripts/convert-cottas.js` runs the reference **pycottas 1.1.0** writer with pinned dependencies in a Docker image. It uses the writer's SPO ordering, duplicate removal, ZSTD level 22, and Parquet v2 policy. Disk mode keeps its intermediate DuckDB database on the generated-data volume. Conversion happens before timing starts.
 
-The output is `generated/dataset.cottas`. Its companion `dataset.cottas.json` records the writer/dependency versions, compression/index policy, triple count, and input/output SHA-256 digests. A verified output is reused; changed source data, writer settings, or output bytes trigger conversion again. Output is validated before replacing the final file. Generated data and reports are ignored by Git.
+The converter writes one file per index order: `generated/dataset.cottas` (spog), `generated/dataset.posg.cottas`, and `generated/dataset.ospg.cottas`. They hold the same triples in different row orders, so a pattern with a bound predicate or object can prune row groups rather than scan. Its companion `dataset.cottas.json` records the writer/dependency versions, compression/index policy, triple count, and input/output SHA-256 digests. A verified output is reused; changed source data, writer settings, or output bytes trigger conversion again. Output is validated before replacing the final file. Generated data and reports are ignored by Git.
 
 The writer image and all Python requirements are pinned in `scripts/cottas-converter/`. `pycottas` was chosen because it is a reference implementation with a published Python package and a defined Parquet writer policy, avoiding a separate Rust/DuckDB compilation in CI.
 

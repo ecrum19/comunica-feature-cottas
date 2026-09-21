@@ -36,6 +36,18 @@ DuckDB applies bound constants, graph constraints, and repeated-variable equalit
 * `maxBufferSize`: The number of bindings this actor's iterators buffer ahead of their consumer, defaults to `128`.
 * `pageSize`: The number of bindings to request from a COTTAS file in a single call, defaults to `8192`. Every call is a separate scan of the file that seeks to its offset, and that seek is linear in the offset, so small pages make a full traversal quadratic. Pages grow from `maxBufferSize` up to this value.
 
+### Index orders
+
+A source may ship the same data in more than one row order. Beside `data.cottas` the actor looks
+for `data.posg.cottas` and `data.ospg.cottas`; each must be a complete COTTAS file with the same
+columns, differing only in row order.
+
+A pattern is answered from the order whose leading components are bound — `spog` for a bound
+subject, `posg` for a bound predicate, `ospg` for a bound object — so DuckDB can prune row groups
+on Parquet statistics instead of scanning. This is the selection rule used by nested-index triple
+stores such as [rdf-stores.js](https://github.com/rubensworks/rdf-stores.js). Siblings are
+optional: with only the primary file the actor behaves exactly as before.
+
 ### Known performance characteristics
 
 Each iterator issues one exact `COUNT(*)` when it starts, and bind joins create one iterator per
