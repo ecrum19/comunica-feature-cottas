@@ -18,7 +18,8 @@ URLs, directories, globs, browser execution, updates, and multiple files in one 
 
 ## Installation and command line
 
-Use Node.js 22 or newer.
+Use Node.js 22.22.2 or newer. Earlier 22.x releases fail `yarn install` because a development
+dependency requires `^22.22.2 || ^24.15.0 || >=26`.
 
 ```bash
 yarn add @comunica/query-sparql-cottas

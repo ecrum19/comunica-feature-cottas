@@ -179,7 +179,9 @@ jobs:
         working-directory: base/performance/benchmark-${{ matrix.benchmark }}
       - name: Remove containers left behind by the base commit benchmarks
         if: env.BENCHMARK_BASE == 'true'
-        run: docker ps -aq | xargs -r docker rm -f
+        run: |
+          docker ps -aq | xargs -r docker rm -f
+          docker network ls --filter name=jbr -q | xargs -r docker network rm
       - name: Run benchmarks
         run: yarn run performance:run
         working-directory: head/performance/benchmark-${{ matrix.benchmark }}

@@ -37,8 +37,10 @@ Every benchmark has been run end to end on a Linux VM (8 cores, 31 GB):
 | --- | --- |
 | `benchmark-watdiv-cottas` | 30 min, no query errors |
 | `benchmark-bsbm-cottas` | 25 min, no query errors |
-| `benchmark-bsbm-cottas-10k` | 85 min, no query errors |
-| `benchmark-watdiv-cottas-100` | 4 h 02 min, no query errors |
+| `benchmark-bsbm-cottas-10k` | 85 min, no query errors (measured before join push-down) |
+| `benchmark-watdiv-cottas-100` | 4 min 46 s, no query errors |
 
-The two 10x benchmarks exceed the 120-minute CI job timeout once a pull request runs both the base
-and the head commit, so they are intended for scheduled or `master`-only runs rather than every PR.
+The WatDiv figure is from after basic graph patterns began being answered by a single DuckDB query;
+before that the same matrix took over seven hours. BSBM 10,000 products has not been re-measured
+since that change, so treat it as the job to watch against the 120-minute CI timeout on a pull
+request, which runs both the base and the head commit.

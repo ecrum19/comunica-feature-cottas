@@ -1,8 +1,8 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-<a name="v5.0.0"></a>
-## v5.0.0 - 2026-09-21
+<a name="v5.3.0"></a>
+## v5.3.0 - 2026-09-21
 
 Initial release, adding COTTAS support to Comunica.
 
