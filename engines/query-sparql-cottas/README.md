@@ -15,7 +15,7 @@ The package also exposes `comunica-dynamic-sparql-cottas` and
 ## JavaScript / TypeScript
 
 ```javascript
-const { QueryEngine } = require('@comunica/query-sparql-cottas');
+const { QueryEngine } = require('@elias.crum/query-sparql-cottas');
 
 const engine = new QueryEngine();
 const bindings = await engine.queryBindings(

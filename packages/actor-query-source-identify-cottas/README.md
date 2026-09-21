@@ -15,7 +15,7 @@ DuckDB applies bound constants, graph constraints, and repeated-variable equalit
 ```json
 {
   "@context": [
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-query-source-identify-cottas/^5.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@elias.crum/actor-query-source-identify-cottas/^0.0.0/components/context.jsonld"
   ],
   "actors": [
     {

@@ -10,5 +10,7 @@
     "CardinalityCache",
     "CottasTermCodec"
   ],
-  "modulePrefix": {}
+  "modulePrefix": {
+    "@elias.crum/config-query-sparql-cottas": "ccqsc"
+  }
 }

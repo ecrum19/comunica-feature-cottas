@@ -7,9 +7,9 @@ All notable changes to this project will be documented in this file.
 Initial release, adding COTTAS support to Comunica.
 
 ### Added
-* Query engine `@comunica/query-sparql-cottas` for local COTTAS files, with static and dynamic command-line entry points and a SPARQL HTTP endpoint
-* Query source actor `@comunica/actor-query-source-identify-cottas`, reading COTTAS through DuckDB and pushing constants, graph restrictions, and repeated-variable equality into the Parquet scan
-* Configuration package `@comunica/config-query-sparql-cottas`
+* Query engine `@elias.crum/query-sparql-cottas` for local COTTAS files, with static and dynamic command-line entry points and a SPARQL HTTP endpoint
+* Query source actor `@elias.crum/actor-query-source-identify-cottas`, reading COTTAS through DuckDB and pushing constants, graph restrictions, and repeated-variable equality into the Parquet scan
+* Configuration package `@elias.crum/config-query-sparql-cottas`
 * Push-down of basic graph patterns: a join of triple patterns is answered by one DuckDB query rather than a lookup per intermediate binding, streamed so that paging never re-executes the join
 * Three index orders per dataset (`spog`, `posg`, `ospg`), with each pattern answered from the order whose leading components are bound
 * Exact cardinality from a separately filtered `COUNT(*)`, cached per document behind a bounded LRU

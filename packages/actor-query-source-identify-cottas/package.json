@@ -1,6 +1,6 @@
 {
-  "name": "@comunica/actor-query-source-identify-cottas",
-  "version": "5.3.0",
+  "name": "@elias.crum/actor-query-source-identify-cottas",
+  "version": "0.1.0",
   "description": "A COTTAS query-source-identify actor for Comunica",
   "lsd:module": true,
   "license": "MIT",

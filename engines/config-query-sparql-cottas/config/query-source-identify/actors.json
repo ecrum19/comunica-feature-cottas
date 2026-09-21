@@ -1,6 +1,6 @@
 {
   "@context": [
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/config-query-sparql-cottas/^5.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@elias.crum/config-query-sparql-cottas/^0.0.0/components/context.jsonld"
   ],
   "import": [
     "ccqsc:config/query-source-identify/actors/cottas.json"

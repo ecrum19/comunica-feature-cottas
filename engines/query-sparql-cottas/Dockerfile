@@ -1,7 +1,7 @@
 FROM node:24
 
 # Install location
-ENV dir /var/www/@comunica/query-sparql-cottas/
+ENV dir /var/www/@elias.crum/query-sparql-cottas/
 
 # Copy the engine files (generated from package.json!files)
 COPY config ${dir}/config/

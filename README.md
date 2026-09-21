@@ -22,7 +22,7 @@ Use Node.js 22.22.2 or newer. Earlier 22.x releases fail `yarn install` because 
 dependency requires `^22.22.2 || ^24.15.0 || >=26`.
 
 ```bash
-yarn add @comunica/query-sparql-cottas
+yarn add @elias.crum/query-sparql-cottas
 comunica-sparql-cottas cottas@/absolute/path/data.cottas \
   'SELECT * WHERE { ?s ?p ?o } LIMIT 100'
 ```
@@ -38,7 +38,7 @@ comunica-sparql-cottas-http cottas@/absolute/path/data.cottas --port 3000
 ## JavaScript / TypeScript
 
 ```javascript
-const { QueryEngine } = require('@comunica/query-sparql-cottas');
+const { QueryEngine } = require('@elias.crum/query-sparql-cottas');
 
 const engine = new QueryEngine();
 const bindings = await engine.queryBindings(

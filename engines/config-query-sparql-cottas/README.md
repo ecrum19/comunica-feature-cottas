@@ -4,7 +4,7 @@ This package extends `@comunica/config-query-sparql` with
 `ActorQuerySourceIdentifyCottas` and its merge-bindings mediator wiring.
 
 ```bash
-yarn add @comunica/config-query-sparql-cottas
+yarn add @elias.crum/config-query-sparql-cottas
 ```
 
 Use `config/config-default.json` as the base configuration for a COTTAS-enabled engine.
