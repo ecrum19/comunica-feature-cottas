@@ -5,13 +5,24 @@ same data and same Comunica version throughout.
 
 ## Summary
 
-Comunica plans the query as a cascade of **bind joins** — tens of thousands of point lookups.
-That is the right plan for HDT, where a lookup is an in-memory index seek. On COTTAS each lookup
-is a DuckDB query over Parquet costing **13.5 ms**, so the same plan is orders of magnitude more
-expensive per step.
+**The COTTAS format is not the problem, and neither is our SQL.** DuckDB answers these queries
+over the very same file in ~0.2 s — faster than HDT. The paper's parity claim is credible.
 
-The cost is **entirely in DuckDB**, not in the RDF translation layer, and it is structural: a
-COTTAS file is a plain Parquet table with no index.
+The gap is architectural. Comunica decomposes a SPARQL query into individual triple-pattern
+lookups and performs the joins itself. Each lookup is a separate DuckDB query costing 7–13 ms,
+which is simply what it costs to read ~100 rows out of a compressed columnar file. C2 issues
+**96,052** of them.
+
+| query | one SQL join in DuckDB | Comunica + COTTAS | HDT |
+|---|---:|---:|---:|
+| C2 (0 solutions) | **0.229 s** | 98–141 s | 9.3 s |
+| C3 (425,591 solutions) | **0.189 s** | 536–557 s | — |
+
+Both SQL runs return exactly the solution counts Comunica does. Allowing ~1.7 s to materialise
+425,591 bindings as RDF terms in JS (measured at ~4 µs/row), a join-pushdown implementation of C3
+should land near 2 s against the current 536 s.
+
+We are using a query engine as if it were a triple-pattern store.
 
 ## 1. Cardinalities are correct
 
@@ -47,9 +58,9 @@ Built `comunica-feature-hdt` on the same VM against the `dataset.hdt` from the s
 HDT flattens the outermost join; COTTAS nests bind joins all the way down. A minor difference —
 nowhere near a 15× gap.
 
-## 4. The cost is DuckDB, not the JS layer
+## 4. The per-lookup cost is irreducible, and it is not our SQL
 
-200 bound-subject lookups of the shape a bind join generates:
+200 bound-subject lookups, WatDiv-100:
 
 | | per lookup |
 |---|---:|
@@ -57,12 +68,22 @@ nowhere near a 15× gap.
 | full adapter (+ N-Triples parse, terms, bindings) | 12.71 ms |
 | **JS translation overhead** | **0.02 ms** |
 
-Split by operation: 2.8 ms cardinality probe + 10.7 ms page read.
+Things ruled out as causes, each measured:
 
-The RDF translation layer is free at this granularity — a point lookup returns few rows. pycottas
-sorts the file SPO, so DuckDB prunes row groups by subject via Parquet statistics (which is why a
-lookup is 10 ms rather than a full 50 MB scan), but there is no index to seek into. HDT ships a
-real SPO index, so the same lookup is a pointer chase.
+| hypothesis | result |
+|---|---|
+| our SQL differs from pycottas's | pycottas's exact form: 8.69 ms vs our 9.90 ms |
+| missing `SET parquet_metadata_cache=true` (pycottas sets it) | 7.86 → 7.27 ms |
+| `file_row_number` + `ORDER BY` we add for paging | 9.90 → 9.12 ms |
+| bound `$path` parameter instead of a literal | no measurable difference |
+| DuckDB's late-materialization optimisation | disabling it: 7.86 → 7.99 ms |
+| row groups too large (122,880 rows) | 32,768 rows: 7.0 ms; 8,192 rows: **16.1 ms**, worse |
+
+`EXPLAIN ANALYZE` confirms pruning works perfectly — the filtered scan finds its 95 rows in 0.00 s.
+The remaining milliseconds are decompressing the Parquet pages that hold them. That is the price of
+one point lookup against a ZSTD-22 columnar file, and pycottas pays it too.
+
+**The per-lookup cost cannot be optimised away. It can only be amortised by doing fewer lookups.**
 
 ## 5. Three index orders: tried, measured
 
@@ -109,15 +130,25 @@ compression cost. Untested.
 
 ## Recommendations
 
-1. **Push joins into DuckDB.** Widen `getSelectorShape` so Comunica delegates joins to the source
-   and SQL does them in one query instead of thousands of point lookups. This is the thing COTTAS
-   can do that HDT structurally cannot, and it removes the per-lookup cost rather than reducing it.
-2. **Index at open time.** Load the Parquet into a DuckDB table with indexes, trading startup cost
-   for fast lookups — what HDT's index provides for free. Viable at benchmark scale; needs care for
-   a 498M-triple file.
-3. **Three index orders** — done, see above. Keep it: it removes an 8.9× cliff on object-bound
-   patterns for 2.7× storage. It does not close the gap on its own.
+1. **Push joins into DuckDB.** This is not an optimisation, it is the architecture the format is
+   built for, and the measurements above put the prize at two to three orders of magnitude.
+   Comunica supports this in two tiers:
+   - `joinBindings: true` on the selector shape. `ActorRdfJoinMultiBindSource` (already in the
+     engine) then hands the source a *block* of bindings instead of one at a time, and the source
+     answers with a single SQL query joining against a `VALUES` list. Bounded semantics — still
+     just triple patterns plus an equijoin — and it collapses 96,052 lookups into a few hundred.
+     This is the cheap, safe win.
+   - A wider selector shape accepting `join` over patterns, compiled to one SQL query. Bigger
+     prize, bigger surface. Safe for basic graph patterns, because join equality is term equality
+     and that is string equality on canonical N-Triples. **Not** safe to extend to `FILTER`,
+     `ORDER BY` or aggregates without care: SPARQL uses value semantics and three-valued logic
+     where SQL would give string comparison. Pushing down joins only is the defensible boundary.
+   - Note that paging a pushed-down join with `LIMIT`/`OFFSET` would re-execute the join per page.
+     This needs DuckDB's streaming reads (`startStream`/`streamAndRead`), which the Node API does
+     expose.
 
-Optimising the JS side has 0.02 ms available to win. A cardinality cache (already implemented)
-removed the 2.8 ms probe on repeated patterns, taking C2 from 513 s to 134 s; the remaining 10.7 ms
-needs one of the two above.
+2. **Three index orders** — implemented, see section 5. Keep it: it removes an 8.9x cliff on
+   object-bound lookups for 2.7x storage. It does not change the conclusion above.
+
+3. **Do not** pursue smaller row groups, the metadata-cache setting, or removing `file_row_number`.
+   All three were measured and none of them moves the number.
