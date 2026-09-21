@@ -9,6 +9,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -57,21 +58,26 @@ def convert(directory):
             return
 
     print(f"Converting {source} with pycottas ({', '.join(INDEX_ORDERS)}, ZSTD level 22)", flush=True)
-    # pycottas uses a fixed database filename in disk mode. Keep it, spill files,
-    # and partially written output in an isolated directory on the data volume.
+    # pycottas uses a fixed database filename in disk mode, so each order needs its own working
+    # directory. Keep those, the spill files, and partially written output on the data volume.
     previous_directory = Path.cwd()
     digests = {}
     with tempfile.TemporaryDirectory(prefix="cottas-", dir=directory) as temporary:
         try:
-            os.chdir(temporary)
             for order in INDEX_ORDERS:
+                workdir = Path(temporary) / order
+                workdir.mkdir()
+                os.chdir(workdir)
                 name = f"{order}.cottas"
                 pycottas.rdf2cottas(str(source), name, index=order, disk=True)
-                converted = Path(temporary) / name
+                converted = workdir / name
                 rows = validate(converted)
                 digests[order] = checksum(converted)
                 converted.replace(targets[order])
                 print(f"  {order}: {rows:,} triples -> {targets[order].name}", flush=True)
+                # Release the scratch database before converting the next order.
+                os.chdir(temporary)
+                shutil.rmtree(workdir, ignore_errors=True)
             manifest = {**policy, "triples": rows, "outputSha256": digests}
             temporary_manifest = Path(temporary) / "dataset.cottas.json"
             temporary_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
