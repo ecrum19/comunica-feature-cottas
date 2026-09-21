@@ -7,12 +7,11 @@ import type { ComunicaDataFactory } from '@comunica/types';
 import type { DuckDBConnection } from '@duckdb/node-api';
 import { DuckDBInstance } from '@duckdb/node-api';
 import type * as RDF from '@rdfjs/types';
-import { Parser, Writer } from 'n3';
+import { CardinalityCache } from './CardinalityCache';
+import { CottasTermCodec, errorMessage } from './CottasTerms';
 
 const COTTAS_COLUMNS = new Set([ 's', 'p', 'o', 'g' ]);
 const REQUIRED_COLUMNS = [ 's', 'p', 'o' ];
-const TERM_PREFIX = '<urn:comunica:cottas:subject> <urn:comunica:cottas:predicate> ';
-const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 /**
  * Index orders a COTTAS source may provide, most significant component first.
  *
@@ -35,53 +34,6 @@ const CARDINALITY_CACHE_SIZE = 65_536;
 export interface ICottasCountResult {
   totalCount: number;
   hasExactCount: boolean;
-}
-
-/**
- * A bounded least-recently-used cache of pending cardinality lookups.
- *
- * A COTTAS document is a read-only file for its whole lifetime, so a pattern's cardinality cannot
- * change and may be reused. Pending promises are stored rather than resolved values, so the
- * concurrent duplicate probes a bind join produces collapse onto a single query.
- */
-export class CardinalityCache<T> {
-  private readonly entries = new Map<string, Promise<T>>();
-  private readonly maxSize: number;
-
-  public constructor(maxSize: number) {
-    this.maxSize = maxSize;
-  }
-
-  public get(key: string): Promise<T> | undefined {
-    const entry = this.entries.get(key);
-    if (entry) {
-      // Re-insert so that the most recently used key is evicted last.
-      this.entries.delete(key);
-      this.entries.set(key, entry);
-    }
-    return entry;
-  }
-
-  public set(key: string, value: Promise<T>): void {
-    this.entries.set(key, value);
-    // A failed lookup must not be remembered; the next caller should retry it. The identity check
-    // matters because this entry may already have been evicted and replaced by the time it settles.
-    value.catch(() => {
-      if (this.entries.get(key) === value) {
-        this.entries.delete(key);
-      }
-    });
-    for (const oldest of this.entries.keys()) {
-      if (this.entries.size <= this.maxSize) {
-        break;
-      }
-      this.entries.delete(oldest);
-    }
-  }
-
-  public clear(): void {
-    this.entries.clear();
-  }
 }
 
 /** Graph-matching options shared by the COTTAS read operations. */
@@ -164,6 +116,16 @@ interface ICottasRow {
   g?: unknown;
 }
 
+/** Accumulates the pieces of a query while patterns are walked. */
+interface ISqlContext {
+  conditions: string[];
+  values: Record<string, string>;
+  /** Variable name to the column its first occurrence reads from. */
+  columns: Map<string, string>;
+  impossible: boolean;
+  addValue: (value: string) => string;
+}
+
 interface IJoinSql {
   sql: string;
   values: Record<string, string>;
@@ -187,7 +149,7 @@ class DuckDBCottasDocument implements CottasDocument {
   private readonly connection: DuckDBConnection;
   private readonly dataFactory: ComunicaDataFactory;
   private readonly instance: DuckDBInstance;
-  private readonly termWriter = new Writer({ format: 'N-Triples' });
+  private readonly terms: CottasTermCodec;
   private readonly cardinalities = new CardinalityCache<ICottasCountResult>(CARDINALITY_CACHE_SIZE);
   private operationQueue: Promise<void> = Promise.resolve();
 
@@ -204,6 +166,7 @@ class DuckDBCottasDocument implements CottasDocument {
     this.instance = instance;
     this.connection = connection;
     this.dataFactory = dataFactory;
+    this.terms = new CottasTermCodec(dataFactory, cottasPath);
     this.hasGraphColumn = hasGraphColumn;
   }
 
@@ -366,7 +329,7 @@ class DuckDBCottasDocument implements CottasDocument {
         if (variables.length === 0) {
           return page.map(() => bindingsFactory.bindings([]));
         }
-        const terms = this.parseTerms(page.flat());
+        const terms = this.terms.parseTerms(page.flat());
         return page.map(row => bindingsFactory.bindings(variables
           .map((variable, index): [RDF.Variable, RDF.Term] => [ variable, terms.get(row[index])! ])));
       },
@@ -430,59 +393,7 @@ class DuckDBCottasDocument implements CottasDocument {
       const graph = <string | null | undefined> row.g;
       return `${subject} ${predicate} ${object}${this.hasGraphColumn && graph !== null ? ` ${graph}` : ''} .`;
     }).join('\n');
-    try {
-      const quads = <RDF.BaseQuad[]> <unknown> new Parser({
-        format: 'N-Quads',
-        blankNodePrefix: '_:',
-        factory: <any> this.dataFactory,
-      }).parse(input);
-      /* istanbul ignore if -- the N-Quads parser emits one quad for every validated line. */
-      if (quads.length !== rows.length) {
-        throw new Error(`expected ${rows.length} RDF statements but decoded ${quads.length}`);
-      }
-      return quads;
-    } catch (error: unknown) {
-      throw new Error(`Invalid RDF term encoding in COTTAS file '${this.cottasPath}': ${errorMessage(error)}`);
-    }
-  }
-
-  /**
-   * List every COTTAS encoding that denotes `term`.
-   *
-   * COTTAS cells hold N-Triples strings, and one RDF term has more than one legal encoding:
-   * N3 escapes astral characters that files usually store raw, and RDF 1.1 makes a simple literal
-   * the same term as an `xsd:string`-typed one. Comparing against a single serialization would
-   * silently drop solutions from files that use another spelling.
-   */
-  private termEncodings(term: RDF.Term): string[] {
-    const serialized = this.serializeTerm(term);
-    const unescaped = unescapeUnicode(serialized);
-    const encodings = unescaped === serialized ? [ serialized ] : [ serialized, unescaped ];
-    if (term.termType === 'Literal' && !term.language && term.datatype.value === XSD_STRING) {
-      return [ ...encodings, ...encodings.map(encoding => `${encoding}^^<${XSD_STRING}>`) ];
-    }
-    return encodings;
-  }
-
-  /** Build a condition matching any encoding of `term`, pushed down into DuckDB. */
-  private termCondition(column: string, term: RDF.Term, addValue: (value: string) => string): string {
-    const encodings = this.termEncodings(term);
-    const language = term.termType === 'Literal' ? term.language : '';
-    // The guard also rules out a base direction such as `@en--ltr`, where the tag is not the
-    // final segment and slicing it off by length would cut into the direction instead.
-    if (language && encodings.every(encoding => encoding.toLowerCase().endsWith(`@${language.toLowerCase()}`))) {
-      // Language tags compare case-insensitively. The prefix pins the lexical form exactly,
-      // so only the tag is left free to differ in case.
-      const clauses = encodings.map((encoding) => {
-        const lexical = addValue(encoding.slice(0, encoding.length - language.length));
-        const folded = addValue(encoding.toLowerCase());
-        return `(starts_with(${column}, ${lexical}) AND lower(${column}) = ${folded})`;
-      });
-      return `(${clauses.join(' OR ')})`;
-    }
-    return encodings.length === 1 ?
-        `${column} = ${addValue(encodings[0])}` :
-        `${column} IN (${encodings.map(addValue).join(', ')})`;
+    return this.terms.parseStatements(input, rows.length);
   }
 
   /**
@@ -566,107 +477,106 @@ class DuckDBCottasDocument implements CottasDocument {
   }
 
   /**
-   * Compile a basic graph pattern into one SQL query.
+   * Add one pattern's conditions to a query being built.
    *
-   * Each pattern becomes an alias over the index best suited to its own bound components. A
-   * variable's first occurrence fixes the column it projects from; every later occurrence becomes
-   * an equality against that column, which is exactly SPARQL's join condition because join
-   * equality is term equality and terms are stored as canonical N-Triples strings.
+   * Shared by the single-pattern and join paths so term encoding and graph semantics cannot drift
+   * apart between them. `alias` is empty for a single pattern, keeping its SQL on bare column names.
    */
-  private joinSql(patterns: ICottasJoinPattern[], options: ICottasGraphOptions): IJoinSql {
-    const froms: string[] = [];
-    const conditions: string[] = [];
-    const values: Record<string, string> = {};
-    const projections = new Map<string, string>();
-    let impossible = false;
-    let parameter = 0;
-
-    const addValue = (value: string): string => {
-      const parameterName = `term${parameter++}`;
-      values[parameterName] = value;
-      return `$${parameterName}`;
-    };
-
-    for (const [ index, pattern ] of patterns.entries()) {
-      const alias = `t${index}`;
-      froms.push(`read_parquet(${
-        addValue(this.indexFor(pattern.subject, pattern.predicate, pattern.object))}) AS ${alias}`);
-      const positions: [string, RDF.Term, boolean][] = [
-        [ 's', pattern.subject, false ],
-        [ 'p', pattern.predicate, false ],
-        [ 'o', pattern.object, false ],
-        [ 'g', pattern.graph, true ],
-      ];
-      for (const [ column, term, isGraph ] of positions) {
-        const qualified = `${alias}.${column}`;
-        if (term.termType === 'Variable') {
-          if (isGraph) {
-            if (!this.hasGraphColumn) {
-              impossible = true;
-              continue;
-            }
-            if (!options.unionDefaultGraph) {
-              conditions.push(`${qualified} IS NOT NULL`);
-            }
+  private addPatternConditions(
+    context: ISqlContext,
+    alias: string,
+    pattern: ICottasJoinPattern,
+    options: ICottasGraphOptions,
+  ): void {
+    const positions: [string, RDF.Term, boolean][] = [
+      [ 's', pattern.subject, false ],
+      [ 'p', pattern.predicate, false ],
+      [ 'o', pattern.object, false ],
+      [ 'g', pattern.graph, true ],
+    ];
+    for (const [ column, term, isGraph ] of positions) {
+      const qualified = alias === '' ? column : `${alias}.${column}`;
+      if (term.termType === 'Variable') {
+        if (isGraph) {
+          if (!this.hasGraphColumn) {
+            context.impossible = true;
+            continue;
           }
-          const first = projections.get(term.value);
-          if (first) {
-            conditions.push(`${qualified} = ${first}`);
-          } else {
-            projections.set(term.value, qualified);
+          // Graph variables skip the default graph, unless it is the union of all graphs.
+          if (!options.unionDefaultGraph) {
+            context.conditions.push(`${qualified} IS NOT NULL`);
           }
-          continue;
         }
-        if (isGraph && term.termType === 'DefaultGraph') {
-          if (this.hasGraphColumn && !options.unionDefaultGraph) {
-            conditions.push(`${qualified} IS NULL`);
-          }
-          continue;
+        // A variable's first occurrence fixes the column it reads from; any later occurrence, in
+        // this pattern or another, becomes an equality against it. That is SPARQL's join condition,
+        // which is term equality, and terms are stored as canonical N-Triples strings.
+        const first = context.columns.get(term.value);
+        if (first) {
+          context.conditions.push(`${qualified} = ${first}`);
+        } else {
+          context.columns.set(term.value, qualified);
         }
-        if (isGraph && !this.hasGraphColumn) {
-          impossible = true;
-          continue;
-        }
-        conditions.push(this.termCondition(qualified, term, addValue));
+        continue;
       }
+      if (isGraph && term.termType === 'DefaultGraph') {
+        // Under union default graph semantics the default graph holds every graph's triples.
+        if (this.hasGraphColumn && !options.unionDefaultGraph) {
+          context.conditions.push(`${qualified} IS NULL`);
+        }
+        continue;
+      }
+      if (isGraph && !this.hasGraphColumn) {
+        context.impossible = true;
+        continue;
+      }
+      context.conditions.push(this.terms.condition(qualified, term, context.addValue));
     }
+  }
 
-    const variables = [ ...projections.keys() ];
-    const select = variables.length === 0 ?
-      '1 AS present' :
-      variables.map((variable, index) => `${projections.get(variable)!} AS c${index}`).join(', ');
-    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
-    return { sql: `SELECT ${select} FROM ${froms.join(', ')}${where}`, values, variables, impossible };
+  /** Start a query builder in which every RDF value becomes a bound parameter. */
+  private sqlContext(): ISqlContext {
+    const values: Record<string, string> = {};
+    let parameter = 0;
+    return {
+      conditions: [],
+      values,
+      columns: new Map(),
+      impossible: false,
+      addValue: (value: string): string => {
+        const parameterName = `term${parameter++}`;
+        values[parameterName] = value;
+        return `$${parameterName}`;
+      },
+    };
   }
 
   /**
-   * Decode a batch of N-Triples strings into RDF terms.
+   * Compile a basic graph pattern into one SQL query.
    *
-   * Terms repeat heavily across join results, so unique values are parsed once in a single pass
-   * rather than per row.
+   * Patterns are comma-joined rather than written as explicit JOINs, leaving DuckDB free to choose
+   * its own join order. Every alias and column name is generated here; all RDF values reach the
+   * query as bound parameters.
    */
-  private parseTerms(values: string[]): Map<string, RDF.Term> {
-    const unique = [ ...new Set(values) ];
-    const decoded = new Map<string, RDF.Term>();
-    const input = unique.map(value => `${TERM_PREFIX}${value} .`).join('\n');
-    let quads: RDF.BaseQuad[];
-    try {
-      quads = <RDF.BaseQuad[]> <unknown> new Parser({
-        format: 'N-Quads',
-        blankNodePrefix: '_:',
-        factory: <any> this.dataFactory,
-      }).parse(input);
-    } catch (error: unknown) {
-      throw new Error(`Invalid RDF term encoding in COTTAS file '${this.cottasPath}': ${errorMessage(error)}`);
+  private joinSql(patterns: ICottasJoinPattern[], options: ICottasGraphOptions): IJoinSql {
+    const context = this.sqlContext();
+    const froms = patterns.map((pattern, index) => `read_parquet(${
+      context.addValue(this.indexFor(pattern.subject, pattern.predicate, pattern.object))}) AS t${index}`);
+    for (const [ index, pattern ] of patterns.entries()) {
+      this.addPatternConditions(context, `t${index}`, pattern, options);
     }
-    /* istanbul ignore if -- the N-Quads parser emits one quad per validated line. */
-    if (quads.length !== unique.length) {
-      throw new Error(`Invalid RDF term encoding in COTTAS file '${this.cottasPath}': incomplete batch`);
-    }
-    for (const [ index, value ] of unique.entries()) {
-      decoded.set(value, quads[index].object);
-    }
-    return decoded;
+
+    const variables = [ ...context.columns.keys() ];
+    // A pattern of nothing but constants still yields one row per match, hence the literal.
+    const select = variables.length === 0 ?
+      '1 AS present' :
+      variables.map((variable, index) => `${context.columns.get(variable)!} AS c${index}`).join(', ');
+    const where = context.conditions.length > 0 ? ` WHERE ${context.conditions.join(' AND ')}` : '';
+    return {
+      sql: `SELECT ${select} FROM ${froms.join(', ')}${where}`,
+      values: context.values,
+      variables,
+      impossible: context.impossible,
+    };
   }
 
   private patternSql(
@@ -676,78 +586,13 @@ class DuckDBCottasDocument implements CottasDocument {
     graph: RDF.Term,
     options: ICottasGraphOptions,
   ): IPatternSql {
-    const conditions: string[] = [];
-    const values: Record<string, string> = {};
-    const variables = new Map<string, string>();
-    let impossible = false;
-    let parameter = 0;
-
-    const addValue = (value: string): string => {
-      const parameterName = `term${parameter++}`;
-      values[parameterName] = value;
-      return `$${parameterName}`;
-    };
-
-    const addTerm = (column: string, term: RDF.Term, isGraph: boolean): void => {
-      if (term.termType === 'Variable') {
-        if (isGraph) {
-          if (!this.hasGraphColumn) {
-            impossible = true;
-            return;
-          }
-          // Graph variables skip the default graph, unless it is the union of all graphs.
-          if (!options.unionDefaultGraph) {
-            conditions.push('g IS NOT NULL');
-          }
-        }
-        const existingColumn = variables.get(term.value);
-        if (existingColumn) {
-          conditions.push(`${column} = ${existingColumn}`);
-        } else {
-          variables.set(term.value, column);
-        }
-        return;
-      }
-      if (isGraph && term.termType === 'DefaultGraph') {
-        // Under union default graph semantics the default graph holds every graph's triples.
-        if (this.hasGraphColumn && !options.unionDefaultGraph) {
-          conditions.push('g IS NULL');
-        }
-        return;
-      }
-      if (isGraph && !this.hasGraphColumn) {
-        impossible = true;
-        return;
-      }
-      conditions.push(this.termCondition(column, term, addValue));
-    };
-
-    addTerm('s', subject, false);
-    addTerm('p', predicate, false);
-    addTerm('o', object, false);
-    addTerm('g', graph, true);
+    const context = this.sqlContext();
+    this.addPatternConditions(context, '', { subject, predicate, object, graph }, options);
     return {
-      whereClause: conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '',
-      values,
-      impossible,
+      whereClause: context.conditions.length > 0 ? ` WHERE ${context.conditions.join(' AND ')}` : '',
+      values: context.values,
+      impossible: context.impossible,
     };
-  }
-
-  private serializeTerm(term: RDF.Term): string {
-    /* istanbul ignore if -- patternSql handles these two non-value terms before serialization. */
-    if (term.termType === 'Variable' || term.termType === 'DefaultGraph') {
-      throw new Error(`RDF term '${term.termType}' cannot be serialized as a COTTAS value.`);
-    }
-    const line = this.termWriter.quadToString(
-      this.dataFactory.namedNode('urn:comunica:cottas:subject'),
-      this.dataFactory.namedNode('urn:comunica:cottas:predicate'),
-      <RDF.Quad_Object> term,
-    );
-    /* istanbul ignore if -- N3's N-Triples writer guarantees this framing. */
-    if (!line.startsWith(TERM_PREFIX) || !line.endsWith(' .\n')) {
-      throw new Error(`Unable to serialize RDF term '${term.value}' for COTTAS.`);
-    }
-    return line.slice(TERM_PREFIX.length, -3);
   }
 }
 
@@ -849,26 +694,4 @@ async function validateLocalPath(inputPath: string): Promise<string> {
     throw new Error(`COTTAS source '${cottasPath}' must be a regular file.`);
   }
   return cottasPath;
-}
-
-/**
- * Decode the `\\uXXXX` and `\\UXXXXXXXX` escapes N3 writes for astral and control characters.
- *
- * Escapes are consumed left to right, so an escaped backslash is copied verbatim and never
- * mistaken for the start of a character escape.
- */
-function unescapeUnicode(value: string): string {
-  return value.replaceAll(
-    /\\(?:U([\da-f]{8})|u([\da-f]{4})|(.))/gisu,
-    (match, long: string | undefined, short: string | undefined) =>
-      (long ?? short) === undefined ? match : String.fromCodePoint(Number.parseInt(long ?? short!, 16)),
-  );
-}
-
-function errorMessage(error: unknown): string {
-  /* istanbul ignore else -- Node.js and DuckDB reject with Error instances. */
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
 }

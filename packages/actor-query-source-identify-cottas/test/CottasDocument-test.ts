@@ -5,7 +5,8 @@ import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { DuckDBInstance } from '@duckdb/node-api';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { CardinalityCache, openCottasDocument } from '../lib/CottasDocument';
+import { CardinalityCache } from '../lib/CardinalityCache';
+import { openCottasDocument } from '../lib/CottasDocument';
 
 const DF = new DataFactory<RDF.BaseQuad>();
 const BF = new BindingsFactory(DF);
