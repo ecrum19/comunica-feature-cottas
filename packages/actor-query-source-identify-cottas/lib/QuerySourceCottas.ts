@@ -80,6 +80,28 @@ export class QuerySourceCottas implements IQuerySource {
     };
   }
 
+  /**
+   * The patterns a join is made of, in the left-to-right order they were written.
+   *
+   * The planner may nest joins rather than hand over one flat list, so a join among the children is
+   * descended into: joining is associative, which makes a join of joins of patterns the same join
+   * over all of those patterns, answerable by one SQL query.
+   */
+  private static joinPatterns(operation: Algebra.Operation): ICottasJoinPattern[] {
+    if (isKnownOperation(operation, Algebra.Types.JOIN)) {
+      return operation.input.flatMap(input => QuerySourceCottas.joinPatterns(input));
+    }
+    if (!isKnownOperation(operation, Algebra.Types.PATTERN)) {
+      throw new Error(`Attempted to pass a join over '${operation.type}' to QuerySourceCottas`);
+    }
+    return [{
+      subject: operation.subject,
+      predicate: operation.predicate,
+      object: operation.object,
+      graph: operation.graph,
+    }];
+  }
+
   /** The join's variables, in the first-occurrence order the compiled SQL projects them. */
   private static joinVariables(patterns: ICottasJoinPattern[]): MetadataVariable[] {
     const variables: MetadataVariable[] = [];
@@ -104,17 +126,7 @@ export class QuerySourceCottas implements IQuerySource {
   public queryBindings(operation: Algebra.Operation, context: IActionContext): BindingsStream {
     const unionDefaultGraph = Boolean(context.get(KeysQueryOperation.unionDefaultGraph));
     if (isKnownOperation(operation, Algebra.Types.JOIN)) {
-      const patterns = operation.input.map((input) => {
-        if (!isKnownOperation(input, Algebra.Types.PATTERN)) {
-          throw new Error(`Attempted to pass a join over '${input.type}' to QuerySourceCottas`);
-        }
-        return <ICottasJoinPattern>{
-          subject: input.subject,
-          predicate: input.predicate,
-          object: input.object,
-          graph: input.graph,
-        };
-      });
+      const patterns = QuerySourceCottas.joinPatterns(operation);
       return new CottasJoinIterator(
         this.cottasDocument,
         this.bindingsFactory,

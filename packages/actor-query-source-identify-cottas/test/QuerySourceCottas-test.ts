@@ -117,6 +117,30 @@ describe('QuerySourceCottas', () => {
       });
     });
 
+    it('should flatten a join the planner nested inside another join', async() => {
+      const document = new MockedCottasDocument([
+        DF.quad(DF.namedNode('a'), DF.namedNode('knows'), DF.namedNode('b')),
+        DF.quad(DF.namedNode('b'), DF.namedNode('knows'), DF.namedNode('c')),
+        DF.quad(DF.namedNode('c'), DF.namedNode('knows'), DF.namedNode('d')),
+      ]);
+      const joined = new QuerySourceCottas('j', document, DF, BF, 128, 8192);
+      const data = joined.queryBindings(AF.createJoin([
+        AF.createJoin([
+          AF.createPattern(DF.variable('x'), DF.namedNode('knows'), DF.variable('y')),
+          AF.createPattern(DF.variable('y'), DF.namedNode('knows'), DF.variable('z')),
+        ]),
+        AF.createPattern(DF.variable('z'), DF.namedNode('knows'), DF.variable('w')),
+      ]), ctx);
+      await expect(data).toEqualBindingsStream([
+        BF.fromRecord({
+          x: DF.namedNode('a'),
+          y: DF.namedNode('b'),
+          z: DF.namedNode('c'),
+          w: DF.namedNode('d'),
+        }),
+      ]);
+    });
+
     it('should reject a join over something that is not a pattern', () => {
       const join = AF.createJoin([
         AF.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
