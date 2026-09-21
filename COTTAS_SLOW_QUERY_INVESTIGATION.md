@@ -64,14 +64,59 @@ sorts the file SPO, so DuckDB prunes row groups by subject via Parquet statistic
 lookup is 10 ms rather than a full 50 MB scan), but there is no index to seek into. HDT ships a
 real SPO index, so the same lookup is a pointer chase.
 
+## 5. Three index orders: tried, measured
+
+Implemented on branch `multi-index`. The converter now writes `dataset.cottas` (spog),
+`dataset.posg.cottas` and `dataset.ospg.cottas` — the same triples in three row orders. The actor
+discovers the siblings and answers each pattern from the order whose leading components are bound,
+the selection rule nested-index stores such as rdf-stores.js use. Siblings are optional; with only
+the primary file behaviour is unchanged.
+
+**Per-lookup cost by pattern shape** (WatDiv-100, 100 lookups each, count + first page):
+
+| pattern | one index | three indexes | |
+|---|---:|---:|---:|
+| `? ? O` | **158.3 ms** | **17.9 ms** | **8.9×** |
+| `? P ?` | 17.9 ms | 10.1 ms | 1.77× |
+| `? P O` | 18.3 ms | 14.3 ms | 1.28× |
+| `S ? ?` | 17.0 ms | 16.7 ms | 1.02× |
+| `S P ?` | 13.2 ms | 13.7 ms | 0.96× |
+
+Object-bound lookups were the pathological case — with only spo ordering they scan the whole file.
+That is now fixed. Subject-bound patterns were already served well by spo and are unchanged.
+
+**End-to-end** (same data, identical solution counts):
+
+| query | one index | three indexes | |
+|---|---:|---:|---:|
+| C2 | 141.5 s | **97.9 s** | 1.45× |
+| C3 | 536.4 s | 557.4 s | 0.96× |
+
+Storage grows 2.7× — 48.3 MB becomes 128 MB across the three files.
+
+**Verdict: worth having, but not the fix.** C2 improves because its bind joins hit object- and
+predicate-bound patterns. C3 does not — its lookups are mostly subject-bound, where spo already
+won, and it comes out marginally slower, plausibly because the working set is now spread over
+128 MB of Parquet rather than 48 MB.
+
+The floor is still 10–18 ms per lookup. Ordering fixes *which* row groups DuckDB reads; it does not
+change the cost of reading one — decompressing a ZSTD-22 row group and scanning it. That residual,
+not the ordering, is what separates this from HDT's microsecond index seek.
+
+A cheaper follow-up in the same direction: pycottas writes DuckDB's default row-group size, so
+pruning granularity is coarse. Smaller row groups would prune finer for point lookups, at some
+compression cost. Untested.
+
 ## Recommendations
 
-1. **Index at open time.** Load the Parquet into a DuckDB table with indexes, trading startup cost
-   for fast lookups — essentially what HDT's index provides for free. Directly attacks the 12.7 ms.
-   Viable at benchmark scale; needs care for a 498M-triple file.
-2. **Push joins into DuckDB.** Widen `getSelectorShape` so Comunica delegates joins to the source
+1. **Push joins into DuckDB.** Widen `getSelectorShape` so Comunica delegates joins to the source
    and SQL does them in one query instead of thousands of point lookups. This is the thing COTTAS
-   can do that HDT structurally cannot.
+   can do that HDT structurally cannot, and it removes the per-lookup cost rather than reducing it.
+2. **Index at open time.** Load the Parquet into a DuckDB table with indexes, trading startup cost
+   for fast lookups — what HDT's index provides for free. Viable at benchmark scale; needs care for
+   a 498M-triple file.
+3. **Three index orders** — done, see above. Keep it: it removes an 8.9× cliff on object-bound
+   patterns for 2.7× storage. It does not close the gap on its own.
 
 Optimising the JS side has 0.02 ms available to win. A cardinality cache (already implemented)
 removed the 2.8 ms probe on repeated patterns, taking C2 from 513 s to 134 s; the remaining 10.7 ms
