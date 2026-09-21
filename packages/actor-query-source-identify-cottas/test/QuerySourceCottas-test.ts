@@ -1,9 +1,10 @@
 import { KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
-import { AlgebraFactory } from '@comunica/utils-algebra';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { MetadataValidationState } from '@comunica/utils-metadata';
+import { doesShapeAcceptOperation } from '@comunica/utils-query-operation';
 import { DataFactory } from 'rdf-data-factory';
 import type { CottasDocument } from '../lib/CottasDocument';
 import { QuerySourceCottas } from '../lib/QuerySourceCottas';
@@ -37,19 +38,92 @@ describe('QuerySourceCottas', () => {
   });
 
   describe('getSelectorShape', () => {
-    it('should return a selector shape', async() => {
+    const patternShape = {
+      type: 'operation',
+      operation: {
+        operationType: 'pattern',
+        pattern: AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      },
+      variablesOptional: [
+        DF.variable('s'),
+        DF.variable('p'),
+        DF.variable('o'),
+      ],
+    };
+
+    it('should accept a pattern or a join of patterns', async() => {
       await expect(source.getSelectorShape()).resolves.toEqual({
-        type: 'operation',
-        operation: {
-          operationType: 'pattern',
-          pattern: AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')),
-        },
-        variablesOptional: [
-          DF.variable('s'),
-          DF.variable('p'),
-          DF.variable('o'),
+        type: 'disjunction',
+        children: [
+          patternShape,
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.JOIN },
+            children: [ patternShape ],
+          },
         ],
       });
+    });
+
+    it('should let Comunica push a basic graph pattern into the source', async() => {
+      const shape = await source.getSelectorShape();
+      const join = AF.createJoin([
+        AF.createPattern(DF.variable('a'), DF.namedNode('p'), DF.variable('b')),
+        AF.createPattern(DF.variable('b'), DF.namedNode('p'), DF.variable('c')),
+      ]);
+      expect(doesShapeAcceptOperation(shape, join)).toBe(true);
+      expect(doesShapeAcceptOperation(shape, AF.createPattern(
+        DF.variable('a'),
+        DF.variable('b'),
+        DF.variable('c'),
+      ))).toBe(true);
+      // A union is not something the source can answer.
+      expect(doesShapeAcceptOperation(shape, AF.createUnion([
+        AF.createPattern(DF.variable('a'), DF.namedNode('p'), DF.variable('b')),
+        AF.createPattern(DF.variable('b'), DF.namedNode('p'), DF.variable('c')),
+      ]))).toBe(false);
+    });
+  });
+
+  describe('join push-down', () => {
+    it('should answer a basic graph pattern as one join', async() => {
+      const join = AF.createJoin([
+        AF.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        AF.createPattern(DF.variable('s'), DF.namedNode('px'), DF.variable('o2')),
+      ]);
+      await expect(source.queryBindings(join, ctx)).toEqualBindingsStream([]);
+    });
+
+    it('should bind variables shared between patterns', async() => {
+      const document = new MockedCottasDocument([
+        DF.quad(DF.namedNode('a'), DF.namedNode('knows'), DF.namedNode('b')),
+        DF.quad(DF.namedNode('b'), DF.namedNode('knows'), DF.namedNode('c')),
+      ]);
+      const joined = new QuerySourceCottas('j', document, DF, BF, 128, 8192);
+      const data = joined.queryBindings(AF.createJoin([
+        AF.createPattern(DF.variable('x'), DF.namedNode('knows'), DF.variable('y')),
+        AF.createPattern(DF.variable('y'), DF.namedNode('knows'), DF.variable('z')),
+      ]), ctx);
+      await expect(data).toEqualBindingsStream([
+        BF.fromRecord({ x: DF.namedNode('a'), y: DF.namedNode('b'), z: DF.namedNode('c') }),
+      ]);
+      await expect(new Promise(resolve => data.getProperty('metadata', resolve))).resolves.toMatchObject({
+        cardinality: { type: 'exact', value: 1 },
+        variables: [
+          { variable: DF.variable('x'), canBeUndef: false },
+          { variable: DF.variable('y'), canBeUndef: false },
+          { variable: DF.variable('z'), canBeUndef: false },
+        ],
+      });
+    });
+
+    it('should reject a join over something that is not a pattern', () => {
+      const join = AF.createJoin([
+        AF.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        AF.createUnion([]),
+      ]);
+      expect(() => source.queryBindings(join, ctx))
+        .toThrow(`Attempted to pass a join over 'union' to QuerySourceCottas`);
     });
   });
 

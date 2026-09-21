@@ -5,13 +5,15 @@ import type {
   FragmentSelectorShape,
   IActionContext,
   IQuerySource,
+  MetadataVariable,
 } from '@comunica/types';
 import { Algebra, isKnownOperation, AlgebraFactory } from '@comunica/utils-algebra';
 import type { BindingsFactory } from '@comunica/utils-bindings-factory';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import type { CottasDocument } from './CottasDocument';
+import type { CottasDocument, ICottasJoinPattern } from './CottasDocument';
 import { CottasIterator } from './CottasIterator';
+import { CottasJoinIterator } from './CottasJoinIterator';
 
 const AF = new AlgebraFactory();
 
@@ -48,7 +50,7 @@ export class QuerySourceCottas implements IQuerySource {
     const predicate = this.dataFactory.variable('p');
     const object = this.dataFactory.variable('o');
     const graph = this.dataFactory.variable('g');
-    this.selectorShape = {
+    const patternShape: FragmentSelectorShape = {
       type: 'operation',
       operation: {
         operationType: 'pattern',
@@ -63,6 +65,32 @@ export class QuerySourceCottas implements IQuerySource {
           [ subject, predicate, object, graph ] :
           [ subject, predicate, object ],
     };
+    // A join of patterns is accepted as well, so that a basic graph pattern reaches the source
+    // whole and can be answered by one SQL query instead of a lookup per binding.
+    this.selectorShape = {
+      type: 'disjunction',
+      children: [
+        patternShape,
+        {
+          type: 'operation',
+          operation: { operationType: 'type', type: Algebra.Types.JOIN },
+          children: [ patternShape ],
+        },
+      ],
+    };
+  }
+
+  /** The join's variables, in the first-occurrence order the compiled SQL projects them. */
+  private static joinVariables(patterns: ICottasJoinPattern[]): MetadataVariable[] {
+    const variables: MetadataVariable[] = [];
+    for (const pattern of patterns) {
+      for (const term of [ pattern.subject, pattern.predicate, pattern.object, pattern.graph ]) {
+        if (term.termType === 'Variable' && !variables.some(known => known.variable.equals(term))) {
+          variables.push({ variable: term, canBeUndef: false });
+        }
+      }
+    }
+    return variables;
   }
 
   public async getFilterFactor(_context: IActionContext): Promise<number> {
@@ -74,6 +102,27 @@ export class QuerySourceCottas implements IQuerySource {
   }
 
   public queryBindings(operation: Algebra.Operation, context: IActionContext): BindingsStream {
+    const unionDefaultGraph = Boolean(context.get(KeysQueryOperation.unionDefaultGraph));
+    if (isKnownOperation(operation, Algebra.Types.JOIN)) {
+      const patterns = operation.input.map((input) => {
+        if (!isKnownOperation(input, Algebra.Types.PATTERN)) {
+          throw new Error(`Attempted to pass a join over '${input.type}' to QuerySourceCottas`);
+        }
+        return <ICottasJoinPattern>{
+          subject: input.subject,
+          predicate: input.predicate,
+          object: input.object,
+          graph: input.graph,
+        };
+      });
+      return new CottasJoinIterator(
+        this.cottasDocument,
+        this.bindingsFactory,
+        patterns,
+        QuerySourceCottas.joinVariables(patterns),
+        { autoStart: false, maxBufferSize: this.maxBufferSize, unionDefaultGraph },
+      );
+    }
     if (!isKnownOperation(operation, Algebra.Types.PATTERN)) {
       throw new Error(`Attempted to pass non-pattern operation '${operation.type}' to QuerySourceCottas`);
     }
@@ -89,7 +138,7 @@ export class QuerySourceCottas implements IQuerySource {
         maxBufferSize: this.maxBufferSize,
         pageSize: this.pageSize,
         graph: operation.graph,
-        unionDefaultGraph: Boolean(context.get(KeysQueryOperation.unionDefaultGraph)),
+        unionDefaultGraph,
       },
     );
   }

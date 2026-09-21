@@ -5,6 +5,7 @@
   ],
   "ignoreComponents": [
     "CottasIterator",
+    "CottasJoinIterator",
     "QuerySourceCottas",
     "CardinalityCache"
   ],

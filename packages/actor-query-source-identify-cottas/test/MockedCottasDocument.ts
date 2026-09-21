@@ -1,13 +1,19 @@
 import type * as RDF from '@rdfjs/types';
+import { DataFactory } from 'rdf-data-factory';
 import type {
   CottasDocument,
   ICottasBindingsResult,
   ICottasCountResult,
   ICottasGraphOptions,
+  ICottasJoinCursor,
+  ICottasJoinPattern,
 } from '../lib/CottasDocument';
 
 export class MockedCottasDocument implements CottasDocument {
+  private static readonly DF = new DataFactory();
+
   public closed = false;
+  public joinClosed = false;
   public readonly hasGraphColumn: boolean;
 
   private readonly triples: RDF.BaseQuad[];
@@ -135,6 +141,91 @@ export class MockedCottasDocument implements CottasDocument {
       }
     }
     return { totalCount: i, hasExactCount: this.hasExactCount };
+  }
+
+  /** Solve a basic graph pattern by backtracking, so the source tests exercise a real join. */
+  private solveJoin(patterns: ICottasJoinPattern[], unionDefaultGraph: boolean): Map<string, RDF.Term>[] {
+    const solutions: Map<string, RDF.Term>[] = [];
+    const extend = (index: number, bound: Map<string, RDF.Term>): void => {
+      if (index === patterns.length) {
+        solutions.push(new Map(bound));
+        return;
+      }
+      const pattern = patterns[index];
+      for (const triple of this.triples) {
+        const next = new Map(bound);
+        const pairs: [RDF.Term, RDF.Term][] = [
+          [ pattern.subject, triple.subject ],
+          [ pattern.predicate, triple.predicate ],
+          [ pattern.object, triple.object ],
+          [ pattern.graph, triple.graph ],
+        ];
+        let matches = true;
+        for (const [ term, value ] of pairs) {
+          if (term.termType === 'Variable') {
+            if (term === pattern.graph && !unionDefaultGraph && value.termType === 'DefaultGraph') {
+              matches = false;
+              break;
+            }
+            const existing = next.get(term.value);
+            if (existing && !existing.equals(value)) {
+              matches = false;
+              break;
+            }
+            next.set(term.value, value);
+          } else if (term.termType === 'DefaultGraph') {
+            if (!unionDefaultGraph && value.termType !== 'DefaultGraph') {
+              matches = false;
+              break;
+            }
+          } else if (!term.equals(value)) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches) {
+          extend(index + 1, next);
+        }
+      }
+    };
+    extend(0, new Map());
+    return solutions;
+  }
+
+  public async countJoin(
+    patterns: ICottasJoinPattern[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasCountResult> {
+    if (this.error) {
+      throw this.error;
+    }
+    return {
+      totalCount: this.solveJoin(patterns, Boolean(options.unionDefaultGraph)).length,
+      hasExactCount: this.hasExactCount,
+    };
+  }
+
+  public async openJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasJoinCursor> {
+    if (this.error) {
+      throw this.error;
+    }
+    const solutions = this.solveJoin(patterns, Boolean(options.unionDefaultGraph));
+    let position = 0;
+    return {
+      read: async(count: number): Promise<RDF.Bindings[]> => {
+        const page = solutions.slice(position, position + count);
+        position += page.length;
+        return page.map(solution => bindingsFactory.bindings([ ...solution ]
+          .map(([ name, term ]): [RDF.Variable, RDF.Term] => [ MockedCottasDocument.DF.variable(name), term ])));
+      },
+      close: async(): Promise<void> => {
+        this.joinClosed = true;
+      },
+    };
   }
 
   public async close(): Promise<void> {

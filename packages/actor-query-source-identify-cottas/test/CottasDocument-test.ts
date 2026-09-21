@@ -22,6 +22,7 @@ describe('CottasDocument', () => {
   let nullTermPath: string;
   let encodingsPath: string;
   let indexedPath: string;
+  let chainPath: string;
 
   beforeAll(async() => {
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'comunica-cottas-test-'));
@@ -34,6 +35,7 @@ describe('CottasDocument', () => {
     nullTermPath = join(temporaryDirectory, 'null-term.cottas');
     encodingsPath = join(temporaryDirectory, 'encodings.cottas');
     indexedPath = join(temporaryDirectory, 'indexed.cottas');
+    chainPath = join(temporaryDirectory, 'chain.cottas');
 
     await createParquet(triplePath, 's VARCHAR, p VARCHAR, o VARCHAR', [
       [ '<urn:s1>', '<urn:p>', '"hello"@en' ],
@@ -85,6 +87,11 @@ describe('CottasDocument', () => {
       [ ...triples ].sort((a, b) => order
         .map(i => String(a[i]).localeCompare(String(b[i])))
         .find(comparison => comparison !== 0) ?? 0);
+    await createParquet(chainPath, 's VARCHAR, p VARCHAR, o VARCHAR', [
+      [ '<urn:a>', '<urn:knows>', '<urn:b>' ],
+      [ '<urn:b>', '<urn:knows>', '<urn:c>' ],
+      [ '<urn:c>', '<urn:knows>', '<urn:d>' ],
+    ]);
     const spo = 's VARCHAR, p VARCHAR, o VARCHAR';
     await createParquet(indexedPath, spo, by(0, 1, 2));
     await createParquet(join(temporaryDirectory, 'indexed.posg.cottas'), spo, by(1, 2, 0));
@@ -408,6 +415,134 @@ describe('CottasDocument', () => {
       { offset: 0, limit: 1 },
     )).rejects.toThrow('non-string or null \'s\'');
     await document.close();
+  });
+
+  describe('join push-down', () => {
+    const patternOf = (subject: RDF.Term, predicate: RDF.Term, object: RDF.Term, graph: RDF.Term = DF.defaultGraph()) =>
+      ({ subject, predicate, object, graph });
+
+    type Cursor = { read: (count: number) => Promise<RDF.Bindings[]> };
+    const drain = async(cursor: Cursor, page = 10): Promise<RDF.Bindings[]> => {
+      const all: RDF.Bindings[] = [];
+      for (let batch = await cursor.read(page); batch.length > 0; batch = await cursor.read(page)) {
+        all.push(...batch);
+      }
+      return all;
+    };
+
+    it('joins two patterns on a shared variable', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const patterns = [
+        patternOf(DF.variable('x'), DF.namedNode('urn:knows'), DF.variable('y')),
+        patternOf(DF.variable('y'), DF.namedNode('urn:knows'), DF.variable('z')),
+      ];
+      await expect(document.countJoin(patterns)).resolves.toEqual({ totalCount: 2, hasExactCount: true });
+      const cursor = await document.openJoin(BF, patterns);
+      const solutions = await drain(cursor);
+      expect(solutions.map(binding => [ 'x', 'y', 'z' ].map(name => binding.get(DF.variable(name))!.value).join('>')))
+        .toEqual([ 'urn:a>urn:b>urn:c', 'urn:b>urn:c>urn:d' ]);
+      await cursor.close();
+      await document.close();
+    });
+
+    it('streams a join across several pages without gaps or repeats', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const cursor = await document.openJoin(BF, [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      ]);
+      // One row per page, so the chunk buffer is drained across many reads.
+      const seen: string[] = [];
+      for (let batch = await cursor.read(1); batch.length > 0; batch = await cursor.read(1)) {
+        seen.push(batch[0].get(DF.variable('s'))!.value);
+      }
+      // Three triples, read one page at a time: every subject appears exactly once.
+      expect(seen).toEqual([ 'urn:a', 'urn:b', 'urn:c' ]);
+      await cursor.close();
+      await document.close();
+    });
+
+    it('applies constants and repeated variables inside a join', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const repeated = DF.variable('t');
+      await expect(document.countJoin([
+        patternOf(repeated, DF.namedNode('urn:p'), repeated),
+      ])).resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await expect(document.countJoin([
+        patternOf(DF.variable('s'), DF.namedNode('urn:p'), DF.literal('hello', 'en')),
+      ])).resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await document.close();
+    });
+
+    it('returns an empty join when a pattern cannot match', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const patterns = [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.namedNode('urn:g')),
+      ];
+      await expect(document.countJoin(patterns)).resolves.toEqual({ totalCount: 0, hasExactCount: true });
+      const cursor = await document.openJoin(BF, patterns);
+      await expect(cursor.read(10)).resolves.toEqual([]);
+      await cursor.close();
+      await document.close();
+    });
+
+    it('produces empty bindings when the join has no variables', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const cursor = await document.openJoin(BF, [
+        patternOf(DF.namedNode('urn:same'), DF.namedNode('urn:p'), DF.namedNode('urn:same')),
+      ]);
+      const solutions = await drain(cursor);
+      expect(solutions).toHaveLength(1);
+      expect([ ...solutions[0] ]).toHaveLength(0);
+      await cursor.close();
+      await document.close();
+    });
+
+    it('honours graph terms and union default graph inside a join', async() => {
+      const document = await openCottasDocument(quadPath, DF);
+      const spo = (graph: RDF.Term) => [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o'), graph),
+      ];
+      await expect(document.countJoin(spo(DF.defaultGraph())))
+        .resolves.toEqual({ totalCount: 1, hasExactCount: true });
+      await expect(document.countJoin(spo(DF.variable('g'))))
+        .resolves.toEqual({ totalCount: 2, hasExactCount: true });
+      await expect(document.countJoin(spo(DF.defaultGraph()), { unionDefaultGraph: true }))
+        .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+      // Under union semantics a graph variable also ranges over the default graph.
+      await expect(document.countJoin(spo(DF.variable('g')), { unionDefaultGraph: true }))
+        .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+      await document.close();
+    });
+
+    it('cannot match a graph variable in a join over a triple table', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      await expect(document.countJoin([
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.variable('g')),
+      ])).resolves.toEqual({ totalCount: 0, hasExactCount: true });
+      await document.close();
+    });
+
+    it('reports invalid RDF term encoding found while joining', async() => {
+      const document = await openCottasDocument(invalidTermPath, DF);
+      const cursor = await document.openJoin(BF, [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      ]);
+      await expect(cursor.read(10)).rejects.toThrow('Invalid RDF term encoding');
+      await cursor.close();
+      await document.close();
+    });
+
+    it('stops returning rows once the cursor is closed', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const cursor = await document.openJoin(BF, [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      ]);
+      await expect(cursor.read(1)).resolves.toHaveLength(1);
+      await cursor.close();
+      await cursor.close();
+      await expect(cursor.read(10)).resolves.toEqual([]);
+      await document.close();
+    });
   });
 
   describe('index selection', () => {

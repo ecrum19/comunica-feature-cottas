@@ -4,6 +4,7 @@ import type * as RDF from '@rdfjs/types';
 import arrayifyStream from 'arrayify-stream';
 import { DataFactory } from 'rdf-data-factory';
 import { CottasIterator } from '../lib/CottasIterator';
+import { CottasJoinIterator } from '../lib/CottasJoinIterator';
 import { MockedCottasDocument } from './MockedCottasDocument';
 import '@comunica/utils-jest';
 
@@ -439,5 +440,81 @@ describe('CottasIterator', () => {
     await expect(new Promise(resolve => it.getProperty('metadata', resolve))).resolves.toMatchObject({
       cardinality: { type: 'estimate', value: 1 },
     });
+  });
+});
+
+describe('CottasJoinIterator', () => {
+  let cottasDocument: any;
+  const pattern = (s: string, p: string, o: string): any => ({
+    subject: DF.variable(s),
+    predicate: DF.namedNode(p),
+    object: DF.variable(o),
+    graph: DF.defaultGraph(),
+  });
+  const chain = [ pattern('x', 'knows', 'y'), pattern('y', 'knows', 'z') ];
+  const variables = [ 'x', 'y', 'z' ].map(name => ({ variable: DF.variable(name), canBeUndef: false }));
+
+  beforeEach(() => {
+    cottasDocument = new MockedCottasDocument([
+      quad('a', 'knows', 'b'),
+      quad('b', 'knows', 'c'),
+      quad('c', 'knows', 'd'),
+    ]);
+  });
+
+  it('should stream the join solutions', async() => {
+    await expect(new CottasJoinIterator(cottasDocument, BF, chain, variables, { maxBufferSize: 1 }))
+      .toEqualBindingsStream([
+        BF.fromRecord({ x: DF.namedNode('a'), y: DF.namedNode('b'), z: DF.namedNode('c') }),
+        BF.fromRecord({ x: DF.namedNode('b'), y: DF.namedNode('c'), z: DF.namedNode('d') }),
+      ]);
+  });
+
+  it('should expose exact cardinality metadata', async() => {
+    const it = new CottasJoinIterator(cottasDocument, BF, chain, variables, { autoStart: false });
+    await expect(new Promise(resolve => it.getProperty('metadata', resolve))).resolves.toMatchObject({
+      cardinality: { type: 'exact', value: 2 },
+      variables,
+    });
+  });
+
+  it('should not return anything when the document is closed', async() => {
+    await cottasDocument.close();
+    await expect(new CottasJoinIterator(cottasDocument, BF, chain, variables, {}))
+      .toEqualBindingsStream([]);
+  });
+
+  it('should expose estimated cardinality when the adapter only estimates', async() => {
+    const estimating = new MockedCottasDocument([ quad('a', 'knows', 'b'), quad('b', 'knows', 'c') ], false);
+    const it = new CottasJoinIterator(estimating, BF, chain, variables, { autoStart: false });
+    await expect(new Promise(resolve => it.getProperty('metadata', resolve))).resolves.toMatchObject({
+      cardinality: { type: 'estimate', value: 1 },
+    });
+  });
+
+  it('should propagate a cardinality failure', async() => {
+    const error = new Error('CottasJoinIterator-count');
+    cottasDocument.setError(error);
+    const it = new CottasJoinIterator(cottasDocument, BF, chain, variables, { autoStart: false });
+    await expect(new Promise((resolve, reject) => {
+      it.on('error', reject);
+      it.on('end', resolve);
+      it.read();
+    })).rejects.toBe(error);
+  });
+
+  it('should propagate a read failure', async() => {
+    const error = new Error('CottasJoinIterator-read');
+    const it = new CottasJoinIterator(cottasDocument, BF, chain, variables, {});
+    jest.spyOn(cottasDocument, 'openJoin').mockRejectedValue(error);
+    await expect(arrayifyStream(it)).rejects.toBe(error);
+  });
+
+  it('should release the cursor when the consumer stops early', async() => {
+    const it = new CottasJoinIterator(cottasDocument, BF, chain, variables, { maxBufferSize: 1 });
+    await new Promise(resolve => it.once('data', resolve));
+    it.destroy();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(cottasDocument.joinClosed).toBe(true);
   });
 });

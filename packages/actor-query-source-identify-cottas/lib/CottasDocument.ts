@@ -93,6 +93,24 @@ export interface ICottasGraphOptions {
   unionDefaultGraph?: boolean;
 }
 
+/** One triple pattern taking part in a pushed-down join. */
+export interface ICottasJoinPattern {
+  subject: RDF.Term;
+  predicate: RDF.Term;
+  object: RDF.Term;
+  graph: RDF.Term;
+}
+
+/**
+ * A live cursor over a pushed-down join.
+ *
+ * The join runs as one streaming DuckDB query, so consuming it page by page never re-executes it.
+ */
+export interface ICottasJoinCursor {
+  read: (count: number) => Promise<RDF.Bindings[]>;
+  close: () => Promise<void>;
+}
+
 /** A bounded page of COTTAS bindings. */
 export interface ICottasBindingsResult {
   bindings: RDF.Bindings[];
@@ -120,6 +138,17 @@ export interface CottasDocument {
     options: ICottasGraphOptions & { offset: number; limit: number },
   ) => Promise<ICottasBindingsResult>;
 
+  countJoin: (
+    patterns: ICottasJoinPattern[],
+    options?: ICottasGraphOptions,
+  ) => Promise<ICottasCountResult>;
+
+  openJoin: (
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    options?: ICottasGraphOptions,
+  ) => Promise<ICottasJoinCursor>;
+
   close: () => Promise<void>;
 }
 
@@ -133,6 +162,13 @@ interface ICottasRow {
   p: unknown;
   o: unknown;
   g?: unknown;
+}
+
+interface IJoinSql {
+  sql: string;
+  values: Record<string, string>;
+  variables: string[];
+  impossible: boolean;
 }
 
 interface IPatternSql {
@@ -251,6 +287,91 @@ class DuckDBCottasDocument implements CottasDocument {
       });
       return { bindings };
     });
+  }
+
+  public async countJoin(
+    patterns: ICottasJoinPattern[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasCountResult> {
+    return this.enqueue(async() => {
+      const join = this.joinSql(patterns, options);
+      if (join.impossible) {
+        return { totalCount: 0, hasExactCount: true };
+      }
+      const reader = await this.connection.runAndReadAll(
+        `SELECT count(*) AS count FROM (${join.sql})`,
+        join.values,
+      );
+      const count = reader.getRowObjectsJS()[0]?.count;
+      /* istanbul ignore if -- DuckDB COUNT returns BIGINT through getRowObjectsJS. */
+      if (typeof count !== 'bigint') {
+        throw new TypeError(`DuckDB returned an invalid COTTAS cardinality for '${this.cottasPath}'.`);
+      }
+      return { totalCount: Number(count), hasExactCount: true };
+    });
+  }
+
+  /**
+   * Run a basic graph pattern as one streaming DuckDB query.
+   *
+   * The cursor gets its own connection: a streaming result holds its connection for as long as it
+   * is being read, so sharing one would serialise concurrent joins behind each other.
+   */
+  public async openJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasJoinCursor> {
+    const join = this.joinSql(patterns, options);
+    if (join.impossible) {
+      return { read: async() => [], close: async() => {
+        // Nothing was opened.
+      } };
+    }
+    const variables = join.variables.map(variable => this.dataFactory.variable(variable));
+    const connection = await this.enqueue(async() => this.instance.connect());
+    // Chunks are fetched and discarded one at a time: materialising the whole result to slice a
+    // page out of it would be quadratic in the number of pages.
+    const result = await connection.stream(join.sql, join.values);
+    let pending: string[][] = [];
+    let exhausted = false;
+    let closed = false;
+
+    const release = async(): Promise<void> => {
+      if (!closed) {
+        closed = true;
+        pending = [];
+        // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
+        connection.closeSync();
+      }
+    };
+
+    return {
+      read: async(count: number): Promise<RDF.Bindings[]> => {
+        if (closed) {
+          return [];
+        }
+        while (pending.length < count && !exhausted) {
+          const chunk = await result.fetchChunk();
+          if (chunk === null || chunk.rowCount === 0) {
+            exhausted = true;
+            break;
+          }
+          pending.push(...<string[][]> <unknown> chunk.getRows());
+        }
+        const page = pending.splice(0, count);
+        if (page.length === 0) {
+          return [];
+        }
+        if (variables.length === 0) {
+          return page.map(() => bindingsFactory.bindings([]));
+        }
+        const terms = this.parseTerms(page.flat());
+        return page.map(row => bindingsFactory.bindings(variables
+          .map((variable, index): [RDF.Variable, RDF.Term] => [ variable, terms.get(row[index])! ])));
+      },
+      close: release,
+    };
   }
 
   public async close(): Promise<void> {
@@ -442,6 +563,110 @@ class DuckDBCottasDocument implements CottasDocument {
       }
     }
     return best;
+  }
+
+  /**
+   * Compile a basic graph pattern into one SQL query.
+   *
+   * Each pattern becomes an alias over the index best suited to its own bound components. A
+   * variable's first occurrence fixes the column it projects from; every later occurrence becomes
+   * an equality against that column, which is exactly SPARQL's join condition because join
+   * equality is term equality and terms are stored as canonical N-Triples strings.
+   */
+  private joinSql(patterns: ICottasJoinPattern[], options: ICottasGraphOptions): IJoinSql {
+    const froms: string[] = [];
+    const conditions: string[] = [];
+    const values: Record<string, string> = {};
+    const projections = new Map<string, string>();
+    let impossible = false;
+    let parameter = 0;
+
+    const addValue = (value: string): string => {
+      const parameterName = `term${parameter++}`;
+      values[parameterName] = value;
+      return `$${parameterName}`;
+    };
+
+    for (const [ index, pattern ] of patterns.entries()) {
+      const alias = `t${index}`;
+      froms.push(`read_parquet(${
+        addValue(this.indexFor(pattern.subject, pattern.predicate, pattern.object))}) AS ${alias}`);
+      const positions: [string, RDF.Term, boolean][] = [
+        [ 's', pattern.subject, false ],
+        [ 'p', pattern.predicate, false ],
+        [ 'o', pattern.object, false ],
+        [ 'g', pattern.graph, true ],
+      ];
+      for (const [ column, term, isGraph ] of positions) {
+        const qualified = `${alias}.${column}`;
+        if (term.termType === 'Variable') {
+          if (isGraph) {
+            if (!this.hasGraphColumn) {
+              impossible = true;
+              continue;
+            }
+            if (!options.unionDefaultGraph) {
+              conditions.push(`${qualified} IS NOT NULL`);
+            }
+          }
+          const first = projections.get(term.value);
+          if (first) {
+            conditions.push(`${qualified} = ${first}`);
+          } else {
+            projections.set(term.value, qualified);
+          }
+          continue;
+        }
+        if (isGraph && term.termType === 'DefaultGraph') {
+          if (this.hasGraphColumn && !options.unionDefaultGraph) {
+            conditions.push(`${qualified} IS NULL`);
+          }
+          continue;
+        }
+        if (isGraph && !this.hasGraphColumn) {
+          impossible = true;
+          continue;
+        }
+        conditions.push(this.termCondition(qualified, term, addValue));
+      }
+    }
+
+    const variables = [ ...projections.keys() ];
+    const select = variables.length === 0 ?
+      '1 AS present' :
+      variables.map((variable, index) => `${projections.get(variable)!} AS c${index}`).join(', ');
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+    return { sql: `SELECT ${select} FROM ${froms.join(', ')}${where}`, values, variables, impossible };
+  }
+
+  /**
+   * Decode a batch of N-Triples strings into RDF terms.
+   *
+   * Terms repeat heavily across join results, so unique values are parsed once in a single pass
+   * rather than per row.
+   */
+  private parseTerms(values: string[]): Map<string, RDF.Term> {
+    const unique = [ ...new Set(values) ];
+    const decoded = new Map<string, RDF.Term>();
+    const input = unique.map(value => `${TERM_PREFIX}${value} .`).join('\n');
+    let quads: RDF.BaseQuad[];
+    try {
+      quads = <RDF.BaseQuad[]> <unknown> new Parser({
+        format: 'N-Quads',
+        blankNodePrefix: '_:',
+        factory: <any> this.dataFactory,
+      }).parse(input);
+    } catch (error: unknown) {
+      throw new Error(`Invalid RDF term encoding in COTTAS file '${this.cottasPath}': ${errorMessage(error)}`);
+    }
+    /* istanbul ignore if -- the N-Quads parser emits one quad per validated line. */
+    if (quads.length !== unique.length) {
+      throw new Error(`Invalid RDF term encoding in COTTAS file '${this.cottasPath}': incomplete batch`);
+    }
+    for (const [ index, value ] of unique.entries()) {
+      decoded.set(value, quads[index].object);
+    }
+    return decoded;
   }
 
   private patternSql(
