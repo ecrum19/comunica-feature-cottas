@@ -5,6 +5,11 @@ import { Parser, Writer } from 'n3';
 const TERM_PREFIX = '<urn:comunica:cottas:subject> <urn:comunica:cottas:predicate> ';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
+/** How stored values are compared against one RDF term; see {@link CottasTermCodec.match}. */
+export type CottasTermMatch =
+  | { kind: 'exact'; encodings: string[] }
+  | { kind: 'language'; spellings: { lexical: string; folded: string }[] };
+
 /**
  * Translates between RDF/JS terms and the N-Triples strings a COTTAS file stores.
  *
@@ -57,25 +62,42 @@ export class CottasTermCodec {
     return encodings;
   }
 
-  /** Build a condition matching any encoding of `term`, pushed down into DuckDB. */
-  public condition(column: string, term: RDF.Term, addValue: (value: string) => string): string {
+  /**
+   * Describe how a stored value is compared against `term`.
+   *
+   * Most terms match by plain equality against one of their encodings. A language-tagged literal
+   * does not: language tags compare case-insensitively, so it matches a stored value that starts
+   * with its lexical form and equals one of its encodings once both are lowercased.
+   */
+  public match(term: RDF.Term): CottasTermMatch {
     const encodings = this.encodings(term);
     const language = term.termType === 'Literal' ? term.language : '';
     // The guard also rules out a base direction such as `@en--ltr`, where the tag is not the
     // final segment and slicing it off by length would cut into the direction instead.
     if (language && encodings.every(encoding => encoding.toLowerCase().endsWith(`@${language.toLowerCase()}`))) {
-      // Language tags compare case-insensitively. The prefix pins the lexical form exactly,
-      // so only the tag is left free to differ in case.
-      const clauses = encodings.map((encoding) => {
-        const lexical = addValue(encoding.slice(0, encoding.length - language.length));
-        const folded = addValue(encoding.toLowerCase());
-        return `(starts_with(${column}, ${lexical}) AND lower(${column}) = ${folded})`;
-      });
+      return {
+        kind: 'language',
+        spellings: encodings.map(encoding => ({
+          // The prefix pins the lexical form exactly, so only the tag is left free to differ in case.
+          lexical: encoding.slice(0, encoding.length - language.length),
+          folded: encoding.toLowerCase(),
+        })),
+      };
+    }
+    return { kind: 'exact', encodings };
+  }
+
+  /** Build a condition matching any encoding of `term`, pushed down into DuckDB. */
+  public condition(column: string, term: RDF.Term, addValue: (value: string) => string): string {
+    const match = this.match(term);
+    if (match.kind === 'language') {
+      const clauses = match.spellings.map(({ lexical, folded }) =>
+        `(starts_with(${column}, ${addValue(lexical)}) AND lower(${column}) = ${addValue(folded)})`);
       return `(${clauses.join(' OR ')})`;
     }
-    return encodings.length === 1 ?
-        `${column} = ${addValue(encodings[0])}` :
-        `${column} IN (${encodings.map(addValue).join(', ')})`;
+    return match.encodings.length === 1 ?
+        `${column} = ${addValue(match.encodings[0])}` :
+        `${column} IN (${match.encodings.map(addValue).join(', ')})`;
   }
 
   /** Parse complete N-Quads lines, expecting exactly `expected` statements. */

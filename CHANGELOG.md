@@ -1,6 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+* Federated querying over several COTTAS files, or COTTAS files mixed with other sources:
+  * The COTTAS source accepts `joinBindings` and `filterBindings`, answering a whole block of pushed bindings with one DuckDB query instead of one query per binding
+  * Join actor `@comunica/actor-rdf-join-inner-multi-bind-sources`, which replaces `bind-source` in the engine: it binds blocks of 256 bindings into one source, or into every branch of the union a pattern becomes when it matches several sources, binding one at a time only into sources that can not take a block
+  * Blank nodes stay correct across sources: a source turns its own skolemized blank nodes back into the ones in its file, and bindings holding blank nodes are never merged by another source
+* `requestTime` parameter, defaulting to `10` ms, reported in the metadata of every pattern so that join planning charges a bind join for each query it sends
+* Federation benchmark harness in `performance/federation`
+
+### Changed
+* Comunica dependencies are aligned with version `5.4.0`
+* All COTTAS sources share one DuckDB instance, each with its own connection, instead of one instance per file
+* A bound join picks the index whose leading components are constants before considering variables bound by the block
+
 <a name="v5.3.0"></a>
 ## v5.3.0 - 2026-09-21
 

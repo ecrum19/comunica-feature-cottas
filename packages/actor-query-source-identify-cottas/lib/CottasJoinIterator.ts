@@ -23,7 +23,10 @@ export class CottasJoinIterator extends BufferedIterator<RDF.Bindings> {
     bindingsFactory: RDF.BindingsFactory,
     patterns: ICottasJoinPattern[],
     variables: MetadataVariable[],
-    options: BufferedIteratorOptions & ICottasGraphOptions,
+    options: BufferedIteratorOptions & ICottasGraphOptions & {
+      /** The time one query against the document takes, in milliseconds, reported in the metadata. */
+      requestTime?: number;
+    },
   ) {
     super(options);
     this.cottasDocument = cottasDocument;
@@ -37,6 +40,7 @@ export class CottasJoinIterator extends BufferedIterator<RDF.Bindings> {
           state: new MetadataValidationState(),
           cardinality: { type: hasExactCount ? 'exact' : 'estimate', value: totalCount },
           variables,
+          ...options.requestTime === undefined ? {} : { requestTime: options.requestTime },
         });
       })
       .catch(error => this.destroy(error));

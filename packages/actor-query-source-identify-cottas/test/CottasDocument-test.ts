@@ -2,10 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { DuckDBInstance } from '@duckdb/node-api';
+import { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import { CardinalityCache } from '../lib/CardinalityCache';
+import type { CottasBoundRow, ICottasCursor } from '../lib/CottasDocument';
 import { openCottasDocument } from '../lib/CottasDocument';
 
 const DF = new DataFactory<RDF.BaseQuad>();
@@ -543,6 +544,202 @@ describe('CottasDocument', () => {
       await cursor.close();
       await expect(cursor.read(10)).resolves.toEqual([]);
       await document.close();
+    });
+  });
+
+  describe('bound joins', () => {
+    const patternOf = (subject: RDF.Term, predicate: RDF.Term, object: RDF.Term, graph: RDF.Term = DF.defaultGraph()) =>
+      ({ subject, predicate, object, graph });
+    const row = (values: Record<string, RDF.Term>): CottasBoundRow => new Map(Object.entries(values));
+    const drain = async<T>(cursor: ICottasCursor<T>): Promise<T[]> => {
+      const all: T[] = [];
+      for (let batch = await cursor.read(2); batch.length > 0; batch = await cursor.read(2)) {
+        all.push(...batch);
+      }
+      await cursor.close();
+      return all;
+    };
+    const describeBindings = (bindings: RDF.Bindings): string => [ ...bindings ]
+      .map(([ variable, term ]) => `${variable.value}=${term.value}`)
+      .sort()
+      .join(' ');
+    const knows = DF.namedNode('urn:knows');
+    const chain = [
+      patternOf(DF.variable('x'), knows, DF.variable('y')),
+      patternOf(DF.variable('y'), knows, DF.variable('z')),
+    ];
+
+    it('joins each row with its solutions and tags them with the row', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const solutions = await drain(await document.openBoundJoin(BF, chain, [
+        row({ x: DF.namedNode('urn:b') }),
+        row({ x: DF.namedNode('urn:missing') }),
+        row({ x: DF.namedNode('urn:a') }),
+      ]));
+      expect(solutions.map(({ row: position, bindings }) => `${position}: ${describeBindings(bindings)}`).sort())
+        .toEqual([
+          '0: x=urn:b y=urn:c z=urn:d',
+          '2: x=urn:a y=urn:b z=urn:c',
+        ]);
+      await document.close();
+    });
+
+    it('matches rows that bind different variables, or none, in one query', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const solutions = await drain(await document.openBoundJoin(BF, chain, [
+        row({ z: DF.namedNode('urn:d') }),
+        row({ x: DF.namedNode('urn:a'), y: DF.namedNode('urn:b') }),
+        // Variables the join does not mention are ignored.
+        row({ unrelated: DF.namedNode('urn:a') }),
+      ]));
+      expect(solutions.map(({ row: position, bindings }) => `${position}: ${describeBindings(bindings)}`).sort())
+        .toEqual([
+          '0: x=urn:b y=urn:c z=urn:d',
+          '1: x=urn:a y=urn:b z=urn:c',
+          '2: x=urn:a y=urn:b z=urn:c',
+          '2: x=urn:b y=urn:c z=urn:d',
+        ]);
+      await document.close();
+    });
+
+    it('matches every legal spelling of a bound term exactly once', async() => {
+      const document = await openCottasDocument(encodingsPath, DF);
+      const subjects = async(values: Record<string, RDF.Term>): Promise<string[]> =>
+        (await drain(await document.openBoundJoin(BF, [
+          patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+        ], [ row(values) ]))).map(({ bindings }) => bindings.get(DF.variable('s'))!.value).sort();
+      await expect(subjects({ o: DF.literal('plain') })).resolves.toEqual([ 'urn:simple', 'urn:typed' ]);
+      await expect(subjects({ o: DF.literal('hi', 'en-gb') })).resolves.toEqual([ 'urn:lower-tag', 'urn:upper-tag' ]);
+      await expect(subjects({ o: DF.literal('a \u{1F600}') }))
+        .resolves.toEqual([ 'urn:escaped-astral', 'urn:raw-astral' ]);
+      await document.close();
+    });
+
+    it('matches a blank node of the document itself', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const solutions = await drain(await document.openBoundJoin(BF, [
+        patternOf(DF.variable('s'), DF.namedNode('urn:p'), DF.variable('o')),
+      ], [ row({ s: DF.blankNode('blank') }) ]));
+      expect(solutions.map(({ bindings }) => bindings.get(DF.variable('o'))!.value)).toEqual([ '42' ]);
+      await document.close();
+    });
+
+    it('returns nothing without rows or when the join cannot match', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const spog = [ patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.variable('g')) ];
+      const spo = [ patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')) ];
+      await expect(drain(await document.openBoundJoin(BF, spo, []))).resolves.toEqual([]);
+      await expect(drain(await document.openBoundJoin(BF, spog, [ row({ s: DF.namedNode('urn:s1') }) ])))
+        .resolves.toEqual([]);
+      await expect(drain(await document.openFilterJoin(BF, spo, []))).resolves.toEqual([]);
+      await expect(drain(await document.openFilterJoin(BF, spog, [ row({ s: DF.namedNode('urn:s1') }) ])))
+        .resolves.toEqual([]);
+      await document.close();
+    });
+
+    it('extends a row that binds nothing with every solution of an unconstrained pattern', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const solutions = await drain(await document.openBoundJoin(BF, [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      ], [ row({}) ]));
+      expect(solutions.map(({ bindings }) => bindings.get(DF.variable('s'))!.value).sort())
+        .toEqual([ 'urn:a', 'urn:b', 'urn:c' ]);
+      await document.close();
+    });
+
+    it('produces empty bindings for rows joined with a pattern without variables', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const constant = [ patternOf(DF.namedNode('urn:same'), DF.namedNode('urn:p'), DF.namedNode('urn:same')) ];
+      const joined = await drain(await document.openBoundJoin(BF, constant, [ row({}), row({}) ]));
+      expect(joined.map(({ row: position, bindings }) => [ position, bindings.size ])).toEqual([[ 0, 0 ], [ 1, 0 ]]);
+      await document.close();
+    });
+
+    it('filters solutions by compatibility with any row, returning each once', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const filtered = async(rows: CottasBoundRow[]): Promise<string[]> =>
+        (await drain(await document.openFilterJoin(BF, chain, rows))).map(describeBindings).sort();
+      await expect(filtered([
+        row({ y: DF.namedNode('urn:b') }),
+        // The same solution is compatible with this row too, yet comes back once.
+        row({ x: DF.namedNode('urn:a') }),
+        row({ x: DF.namedNode('urn:missing') }),
+      ])).resolves.toEqual([ 'x=urn:a y=urn:b z=urn:c' ]);
+      // A row binding none of the join's variables is compatible with every solution.
+      await expect(filtered([ row({ y: DF.namedNode('urn:b') }), row({}) ])).resolves.toEqual([
+        'x=urn:a y=urn:b z=urn:c',
+        'x=urn:b y=urn:c z=urn:d',
+      ]);
+      await expect(filtered([ row({ x: DF.literal('hi', 'en') }) ])).resolves.toEqual([]);
+      await document.close();
+    });
+
+    it('filters a pattern without variables', async() => {
+      const document = await openCottasDocument(triplePath, DF);
+      const constant = [ patternOf(DF.namedNode('urn:same'), DF.namedNode('urn:p'), DF.namedNode('urn:same')) ];
+      // A row binding a variable the join does not have is compatible with its one solution.
+      await expect(drain(await document.openFilterJoin(BF, constant, [ row({ other: DF.namedNode('urn:x') }) ])))
+        .resolves.toHaveLength(1);
+      await document.close();
+    });
+
+    it('prefers an index with a leading constant over one led by block-bound values', async() => {
+      const document = await openCottasDocument(indexedPath, DF);
+      const stream = jest.spyOn(DuckDBConnection.prototype, 'stream');
+      await drain(await document.openBoundJoin(BF, [
+        patternOf(DF.variable('s'), DF.namedNode('urn:p1'), DF.variable('o')),
+      ], [ row({ s: DF.namedNode('urn:s2') }) ]));
+      // The subject is bound by the block, the predicate by a constant: posg prunes on the constant.
+      expect(Object.values(<Record<string, string>> stream.mock.calls[0][1])
+        .find(value => value.endsWith('.cottas'))).toBe(join(temporaryDirectory, 'indexed.posg.cottas'));
+      await drain(await document.openBoundJoin(BF, [
+        patternOf(DF.variable('s'), DF.variable('p'), DF.variable('o')),
+      ], [ row({ o: DF.namedNode('urn:o5') }) ]));
+      // Without constants the block-bound object leads the choice.
+      expect(Object.values(<Record<string, string>> stream.mock.calls[1][1])
+        .find(value => value.endsWith('.cottas'))).toBe(join(temporaryDirectory, 'indexed.ospg.cottas'));
+      stream.mockRestore();
+      await document.close();
+    });
+
+    it('releases the connection of a query that fails to start', async() => {
+      const document = await openCottasDocument(chainPath, DF);
+      const stream = jest.spyOn(DuckDBConnection.prototype, 'stream').mockRejectedValueOnce(new Error('broken'));
+      const close = jest.spyOn(DuckDBConnection.prototype, 'closeSync');
+      await expect(document.openJoin(BF, chain)).rejects.toThrow('broken');
+      expect(close).toHaveBeenCalledTimes(1);
+      stream.mockRestore();
+      close.mockRestore();
+      await document.close();
+    });
+  });
+
+  describe('shared DuckDB instance', () => {
+    it('serves all open documents from one instance and closes it with the last one', async() => {
+      const first = await openCottasDocument(chainPath, DF);
+      const second = await openCottasDocument(triplePath, DF);
+      const instance = (<any> first).instance;
+      expect((<any> second).instance).toBe(instance);
+      const closeInstance = jest.spyOn(instance, 'closeSync');
+
+      await first.close();
+      expect(closeInstance).not.toHaveBeenCalled();
+      await expect(second.countPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 5, hasExactCount: true });
+      await second.close();
+      expect(closeInstance).toHaveBeenCalledTimes(1);
+
+      const third = await openCottasDocument(chainPath, DF);
+      expect((<any> third).instance).not.toBe(instance);
+      await third.close();
+    });
+
+    it('keeps the instance open for other documents when opening one fails', async() => {
+      const open = await openCottasDocument(chainPath, DF);
+      await expect(openCottasDocument(invalidSchemaPath, DF)).rejects.toThrow('Unable to open COTTAS file');
+      await expect(open.countPattern(DF.variable('s'), DF.variable('p'), DF.variable('o')))
+        .resolves.toEqual({ totalCount: 3, hasExactCount: true });
+      await open.close();
     });
   });
 
