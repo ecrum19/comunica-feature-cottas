@@ -27,6 +27,7 @@ export class ActorQuerySourceIdentifyCottas extends ActorQuerySourceIdentify {
   public readonly mediatorMergeBindingsContext: MediatorMergeBindingsContext;
   public readonly maxBufferSize: number;
   public readonly pageSize: number;
+  public readonly requestTime: number;
 
   public constructor(args: IActorQuerySourceIdentifyCottasArgs) {
     super(args);
@@ -34,6 +35,7 @@ export class ActorQuerySourceIdentifyCottas extends ActorQuerySourceIdentify {
     this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
     this.maxBufferSize = args.maxBufferSize;
     this.pageSize = args.pageSize;
+    this.requestTime = args.requestTime;
     this.httpInvalidator.addInvalidateListener(
       ({ url }: IActionHttpInvalidate) => {
         // eslint-disable-next-line ts/no-floating-promises
@@ -63,6 +65,7 @@ export class ActorQuerySourceIdentifyCottas extends ActorQuerySourceIdentify {
       await BindingsFactory.create(this.mediatorMergeBindingsContext, action.context, dataFactory),
       this.maxBufferSize,
       this.pageSize,
+      this.requestTime,
     );
     this.createdSources.push(new WeakRef(source));
 
@@ -118,4 +121,11 @@ export interface IActorQuerySourceIdentifyCottasArgs extends IActorQuerySourceId
    * @default {8192}
    */
   pageSize: number;
+  /**
+   * The time one query against a COTTAS file takes, in milliseconds, however few rows it returns.
+   * Reported as the request time of every pattern, so that join planning charges a bind join for
+   * each query it would send instead of treating a lookup as free.
+   * @default {10}
+   */
+  requestTime: number;
 }

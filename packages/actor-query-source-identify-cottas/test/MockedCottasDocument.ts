@@ -1,9 +1,12 @@
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import type {
+  CottasBoundRow,
   CottasDocument,
   ICottasBindingsResult,
+  ICottasBoundSolution,
   ICottasCountResult,
+  ICottasCursor,
   ICottasGraphOptions,
   ICottasJoinCursor,
   ICottasJoinPattern,
@@ -226,6 +229,78 @@ export class MockedCottasDocument implements CottasDocument {
         this.joinClosed = true;
       },
     };
+  }
+
+  /** Substitute a row's values into the patterns, the way a bind join binds them. */
+  private static bindPatterns(patterns: ICottasJoinPattern[], row: CottasBoundRow): ICottasJoinPattern[] {
+    const bind = (term: RDF.Term): RDF.Term => term.termType === 'Variable' ? row.get(term.value) ?? term : term;
+    return patterns.map(pattern => ({
+      subject: bind(pattern.subject),
+      predicate: bind(pattern.predicate),
+      object: bind(pattern.object),
+      graph: bind(pattern.graph),
+    }));
+  }
+
+  private static cursorOver<T>(items: T[], onClose: () => void): ICottasCursor<T> {
+    let position = 0;
+    return {
+      read: async(count: number): Promise<T[]> => {
+        const page = items.slice(position, position + count);
+        position += page.length;
+        return page;
+      },
+      close: async(): Promise<void> => onClose(),
+    };
+  }
+
+  private toBindings(bindingsFactory: RDF.BindingsFactory, solution: Map<string, RDF.Term>): RDF.Bindings {
+    return bindingsFactory.bindings([ ...solution ]
+      .map(([ name, term ]): [RDF.Variable, RDF.Term] => [ MockedCottasDocument.DF.variable(name), term ]));
+  }
+
+  public boundJoinCalls: CottasBoundRow[][] = [];
+
+  public async openBoundJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasCursor<ICottasBoundSolution>> {
+    if (this.error) {
+      throw this.error;
+    }
+    this.boundJoinCalls.push(rows);
+    const solutions: ICottasBoundSolution[] = [];
+    for (const [ row, values ] of rows.entries()) {
+      for (const solution of this.solveJoin(
+        MockedCottasDocument.bindPatterns(patterns, values),
+        Boolean(options.unionDefaultGraph),
+      )) {
+        solutions.push({ row, bindings: this.toBindings(bindingsFactory, new Map([ ...values, ...solution ])) });
+      }
+    }
+    return MockedCottasDocument.cursorOver(solutions, () => {
+      this.joinClosed = true;
+    });
+  }
+
+  public async openFilterJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasJoinCursor> {
+    if (this.error) {
+      throw this.error;
+    }
+    this.boundJoinCalls.push(rows);
+    const solutions = this.solveJoin(patterns, Boolean(options.unionDefaultGraph))
+      .filter(solution => rows.some(row => [ ...row ].every(([ name, term ]) => solution.get(name)?.equals(term))));
+    const bindings = solutions.map(solution => this.toBindings(bindingsFactory, solution));
+    return MockedCottasDocument.cursorOver(bindings, () => {
+      this.joinClosed = true;
+    });
   }
 
   public async close(): Promise<void> {

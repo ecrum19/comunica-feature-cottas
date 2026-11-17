@@ -1,5 +1,6 @@
 export * from './ActorQuerySourceIdentifyCottas';
 export * from './CardinalityCache';
+export * from './CottasBoundJoinIterator';
 export * from './CottasDocument';
 export * from './CottasIterator';
 export * from './CottasJoinIterator';

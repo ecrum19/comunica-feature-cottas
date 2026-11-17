@@ -8,6 +8,7 @@ import type { DuckDBConnection } from '@duckdb/node-api';
 import { DuckDBInstance } from '@duckdb/node-api';
 import type * as RDF from '@rdfjs/types';
 import { CardinalityCache } from './CardinalityCache';
+import type { CottasTermMatch } from './CottasTerms';
 import { CottasTermCodec, errorMessage } from './CottasTerms';
 
 const COTTAS_COLUMNS = new Set([ 's', 'p', 'o', 'g' ]);
@@ -54,13 +55,31 @@ export interface ICottasJoinPattern {
 }
 
 /**
- * A live cursor over a pushed-down join.
+ * A live cursor over a pushed-down query.
  *
- * The join runs as one streaming DuckDB query, so consuming it page by page never re-executes it.
+ * The query runs as one streaming DuckDB query, so consuming it page by page never re-executes it.
  */
-export interface ICottasJoinCursor {
-  read: (count: number) => Promise<RDF.Bindings[]>;
+export interface ICottasCursor<T> {
+  read: (count: number) => Promise<T[]>;
   close: () => Promise<void>;
+}
+
+/** A live cursor over a pushed-down join. */
+export type ICottasJoinCursor = ICottasCursor<RDF.Bindings>;
+
+/**
+ * One binding pushed into a bound join, as the values it gives the join's variables by name.
+ *
+ * Only variables the join mentions are listed; a variable missing from the map is unbound, which
+ * matches anything. The terms must already be local to this document: a blank node here is one of
+ * the document's own blank nodes.
+ */
+export type CottasBoundRow = Map<string, RDF.Term>;
+
+/** One solution of a bound join, tagged with the position of the pushed binding it extends. */
+export interface ICottasBoundSolution {
+  row: number;
+  bindings: RDF.Bindings;
 }
 
 /** A bounded page of COTTAS bindings. */
@@ -101,6 +120,27 @@ export interface CottasDocument {
     options?: ICottasGraphOptions,
   ) => Promise<ICottasJoinCursor>;
 
+  /**
+   * Join a block of bindings with a basic graph pattern in one query.
+   *
+   * Every solution is tagged with the row it extends, so the caller can merge it with the full
+   * binding, including variables the pattern does not mention.
+   */
+  openBoundJoin: (
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options?: ICottasGraphOptions,
+  ) => Promise<ICottasCursor<ICottasBoundSolution>>;
+
+  /** Return the solutions of a basic graph pattern that are compatible with at least one row. */
+  openFilterJoin: (
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options?: ICottasGraphOptions,
+  ) => Promise<ICottasJoinCursor>;
+
   close: () => Promise<void>;
 }
 
@@ -128,6 +168,13 @@ interface ISqlContext {
 
 interface IJoinSql {
   sql: string;
+  /** The projection of `sql`, empty when the join has no variables. */
+  select: string;
+  from: string;
+  conditions: string[];
+  /** Variable name to the column its first occurrence reads from. */
+  columns: Map<string, string>;
+  addValue: (value: string) => string;
   values: Record<string, string>;
   variables: string[];
   impossible: boolean;
@@ -137,6 +184,60 @@ interface IPatternSql {
   whereClause: string;
   values: Record<string, string>;
   impossible: boolean;
+}
+
+/** One VALUES column of a bound join, and how it is compared against the variable's column. */
+interface IBoundColumn {
+  variable: string;
+  kind: CottasTermMatch['kind'];
+}
+
+/** Rows of a bound join that bind the same variables the same way, compiled as one VALUES relation. */
+interface IBoundGroup {
+  columns: IBoundColumn[];
+  /** Each entry is a row position followed by the values of `columns`, two per language column. */
+  tuples: [number, ...string[]][];
+}
+
+/**
+ * The single DuckDB instance shared by every open COTTAS document.
+ *
+ * Each instance runs its own thread pool sized to the machine, so one instance per document would
+ * oversubscribe the CPU as soon as a query federates over several files. Each document still gets
+ * its own connection.
+ */
+let sharedInstance: { instance: Promise<DuckDBInstance>; users: number } | undefined;
+
+async function acquireInstance(): Promise<DuckDBInstance> {
+  sharedInstance ??= { instance: DuckDBInstance.create(':memory:'), users: 0 };
+  const current = sharedInstance;
+  current.users++;
+  try {
+    return await current.instance;
+  } catch (error: unknown) {
+    /* istanbul ignore next -- DuckDB only fails to create an in-memory database when out of memory. */
+    releaseInstanceUse(current);
+    /* istanbul ignore next */
+    throw error;
+  }
+}
+
+function releaseInstanceUse(current: { instance: Promise<DuckDBInstance>; users: number }): boolean {
+  current.users--;
+  if (current.users === 0 && sharedInstance === current) {
+    sharedInstance = undefined;
+    return true;
+  }
+  return false;
+}
+
+/** Give up one use of the shared instance, closing it when no document uses it any more. */
+function releaseInstance(instance: DuckDBInstance): void {
+  /* istanbul ignore else -- every release is paired with an acquire. */
+  if (sharedInstance && releaseInstanceUse(sharedInstance)) {
+    // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
+    instance.closeSync();
+  }
 }
 
 /** A DuckDB-backed view over one local COTTAS file. */
@@ -274,12 +375,7 @@ class DuckDBCottasDocument implements CottasDocument {
     });
   }
 
-  /**
-   * Run a basic graph pattern as one streaming DuckDB query.
-   *
-   * The cursor gets its own connection: a streaming result holds its connection for as long as it
-   * is being read, so sharing one would serialise concurrent joins behind each other.
-   */
+  /** Run a basic graph pattern as one streaming DuckDB query. */
   public async openJoin(
     bindingsFactory: RDF.BindingsFactory,
     patterns: ICottasJoinPattern[],
@@ -287,54 +383,60 @@ class DuckDBCottasDocument implements CottasDocument {
   ): Promise<ICottasJoinCursor> {
     const join = this.joinSql(patterns, options);
     if (join.impossible) {
-      return { read: async() => [], close: async() => {
-        // Nothing was opened.
-      } };
+      return emptyCursor();
     }
-    const variables = join.variables.map(variable => this.dataFactory.variable(variable));
-    const connection = await this.enqueue(async() => this.instance.connect());
-    // Chunks are fetched and discarded one at a time: materialising the whole result to slice a
-    // page out of it would be quadratic in the number of pages.
-    const result = await connection.stream(join.sql, join.values);
-    let pending: string[][] = [];
-    let exhausted = false;
-    let closed = false;
+    return this.stream(join.sql, join.values, this.bindingsDecoder(bindingsFactory, join.variables, 0));
+  }
 
-    const release = async(): Promise<void> => {
-      if (!closed) {
-        closed = true;
-        pending = [];
-        // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
-        connection.closeSync();
-      }
-    };
+  public async openBoundJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasCursor<ICottasBoundSolution>> {
+    const groups = this.boundGroups(patterns, rows);
+    const join = this.joinSql(patterns, options, boundVariables(rows));
+    if (join.impossible || groups.length === 0) {
+      return emptyCursor();
+    }
+    // One equi-join per group, so DuckDB can hash every comparison; a NULL-tolerant comparison
+    // covering all groups at once would force a nested loop.
+    const branches = groups.map((group) => {
+      const relation = this.valuesRelation(join, group, true);
+      const conditions = [ ...join.conditions, ...this.boundConditions(join, group) ];
+      return `SELECT b.k AS k${join.select === '' ? '' : `, ${join.select}`} FROM ${relation}, ${join.from}${
+        conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''}`;
+    });
+    const decode = this.bindingsDecoder(bindingsFactory, join.variables, 1);
+    return this.stream(branches.join(' UNION ALL '), join.values, page => decode(page)
+      .map((bindings, index) => ({ row: Number(page[index][0]), bindings })));
+  }
 
-    return {
-      read: async(count: number): Promise<RDF.Bindings[]> => {
-        if (closed) {
-          return [];
-        }
-        while (pending.length < count && !exhausted) {
-          const chunk = await result.fetchChunk();
-          if (chunk === null || chunk.rowCount === 0) {
-            exhausted = true;
-            break;
-          }
-          pending.push(...<string[][]> <unknown> chunk.getRows());
-        }
-        const page = pending.splice(0, count);
-        if (page.length === 0) {
-          return [];
-        }
-        if (variables.length === 0) {
-          return page.map(() => bindingsFactory.bindings([]));
-        }
-        const terms = this.terms.parseTerms(page.flat());
-        return page.map(row => bindingsFactory.bindings(variables
-          .map((variable, index): [RDF.Variable, RDF.Term] => [ variable, terms.get(row[index])! ])));
-      },
-      close: release,
-    };
+  public async openFilterJoin(
+    bindingsFactory: RDF.BindingsFactory,
+    patterns: ICottasJoinPattern[],
+    rows: CottasBoundRow[],
+    options: ICottasGraphOptions = {},
+  ): Promise<ICottasJoinCursor> {
+    const groups = this.boundGroups(patterns, rows);
+    if (groups.some(group => group.columns.length === 0)) {
+      // A row that binds none of the join's variables is compatible with every solution.
+      return this.openJoin(bindingsFactory, patterns, options);
+    }
+    const join = this.joinSql(patterns, options, boundVariables(rows));
+    if (join.impossible || groups.length === 0) {
+      return emptyCursor();
+    }
+    // A semi-join: a solution compatible with several rows is still returned only once.
+    const exists = groups.map(group => `EXISTS (SELECT 1 FROM ${this.valuesRelation(join, group, false)} WHERE ${
+      this.boundConditions(join, group).join(' AND ')})`);
+    const conditions = [ ...join.conditions, `(${exists.join(' OR ')})` ];
+    // Every group binds a variable here, so the join has at least one to project.
+    return this.stream(
+      `SELECT ${join.select} FROM ${join.from} WHERE ${conditions.join(' AND ')}`,
+      join.values,
+      this.bindingsDecoder(bindingsFactory, join.variables, 0),
+    );
   }
 
   public async close(): Promise<void> {
@@ -346,8 +448,143 @@ class DuckDBCottasDocument implements CottasDocument {
     await this.operationQueue;
     // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
     this.connection.closeSync();
-    // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
-    this.instance.closeSync();
+    releaseInstance(this.instance);
+  }
+
+  /**
+   * Stream a query's result through `decode`, one DuckDB chunk at a time.
+   *
+   * The cursor gets its own connection: a streaming result holds its connection for as long as it
+   * is being read, so sharing one would serialise concurrent queries behind each other. Chunks are
+   * fetched and discarded one at a time: materialising the whole result to slice a page out of it
+   * would be quadratic in the number of pages.
+   */
+  private async stream<T>(
+    sql: string,
+    values: Record<string, string>,
+    decode: (page: unknown[][]) => T[],
+  ): Promise<ICottasCursor<T>> {
+    const connection = await this.enqueue(async() => this.instance.connect());
+    let result;
+    try {
+      result = await connection.stream(sql, values);
+    } catch (error: unknown) {
+      // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
+      connection.closeSync();
+      throw error;
+    }
+    let pending: unknown[][] = [];
+    let exhausted = false;
+    let closed = false;
+
+    return {
+      read: async(count: number): Promise<T[]> => {
+        if (closed) {
+          return [];
+        }
+        while (pending.length < count && !exhausted) {
+          const chunk = await result.fetchChunk();
+          if (chunk === null || chunk.rowCount === 0) {
+            exhausted = true;
+            break;
+          }
+          pending.push(...chunk.getRows());
+        }
+        const page = pending.splice(0, count);
+        return page.length === 0 ? [] : decode(page);
+      },
+      close: async(): Promise<void> => {
+        if (!closed) {
+          closed = true;
+          pending = [];
+          // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
+          connection.closeSync();
+        }
+      },
+    };
+  }
+
+  /** Decode result rows into bindings of `variables`, whose columns start at `offset`. */
+  private bindingsDecoder(
+    bindingsFactory: RDF.BindingsFactory,
+    variableNames: string[],
+    offset: number,
+  ): (page: unknown[][]) => RDF.Bindings[] {
+    const variables = variableNames.map(variable => this.dataFactory.variable(variable));
+    return (page) => {
+      if (variables.length === 0) {
+        return page.map(() => bindingsFactory.bindings([]));
+      }
+      const terms = this.terms.parseTerms(page.flatMap(row => <string[]> row.slice(offset)));
+      return page.map(row => bindingsFactory.bindings(variables
+        .map((variable, index): [RDF.Variable, RDF.Term] => [ variable, terms.get(<string> row[offset + index])! ])));
+    };
+  }
+
+  /**
+   * Group bound rows by which join variables they bind, and how each is compared.
+   *
+   * A row may leave a variable the others bind unbound, which then matches anything; that is not an
+   * equality DuckDB can hash, so such rows go into a group of their own. A term with several legal
+   * spellings becomes several tuples with the same row position, one per combination of spellings:
+   * a stored value equals at most one of them, so this cannot produce a solution twice.
+   */
+  private boundGroups(patterns: ICottasJoinPattern[], rows: CottasBoundRow[]): IBoundGroup[] {
+    const joinVariables = new Set(patterns.flatMap(pattern =>
+      [ pattern.subject, pattern.predicate, pattern.object, pattern.graph ]
+        .filter(term => term.termType === 'Variable')
+        .map(term => term.value)));
+    const groups = new Map<string, IBoundGroup>();
+    for (const [ position, row ] of rows.entries()) {
+      const matches: [string, CottasTermMatch][] = [];
+      for (const [ variable, term ] of row) {
+        if (joinVariables.has(variable)) {
+          matches.push([ variable, this.terms.match(term) ]);
+        }
+      }
+      matches.sort(([ left ], [ right ]) => left.localeCompare(right));
+      const key = matches.map(([ variable, match ]) => `${variable}\u0000${match.kind}`).join('\u0001');
+      let group = groups.get(key);
+      if (!group) {
+        group = { columns: matches.map(([ variable, match ]) => ({ variable, kind: match.kind })), tuples: []};
+        groups.set(key, group);
+      }
+      let tuples: string[][] = [[]];
+      for (const [ , match ] of matches) {
+        const spellings = match.kind === 'exact' ?
+          match.encodings.map(encoding => [ encoding ]) :
+          match.spellings.map(({ lexical, folded }) => [ lexical, folded ]);
+        tuples = tuples.flatMap(prefix => spellings.map(spelling => [ ...prefix, ...spelling ]));
+      }
+      for (const tuple of tuples) {
+        group.tuples.push([ position, ...tuple ]);
+      }
+    }
+    return [ ...groups.values() ];
+  }
+
+  /** Write a group's tuples as a VALUES relation named `b`, its RDF values as bound parameters. */
+  private valuesRelation(join: IJoinSql, group: IBoundGroup, withPosition: boolean): string {
+    const names = withPosition ? [ 'k' ] : [];
+    for (const [ index, column ] of group.columns.entries()) {
+      names.push(...column.kind === 'exact' ? [ `v${index}` ] : [ `l${index}`, `f${index}` ]);
+    }
+    // Row positions are integers generated here, so they are written inline rather than bound.
+    const tuples = group.tuples.map(([ position, ...values ]) => `(${[
+      ...withPosition ? [ String(position) ] : [],
+      ...values.map(value => join.addValue(value)),
+    ].join(', ')})`);
+    return `(VALUES ${tuples.join(', ')}) AS b(${names.join(', ')})`;
+  }
+
+  /** The conditions tying a group's VALUES columns to the columns of the variables they bind. */
+  private boundConditions(join: IJoinSql, group: IBoundGroup): string[] {
+    return group.columns.map(({ variable, kind }, index) => {
+      const column = join.columns.get(variable)!;
+      return kind === 'exact' ?
+        `${column} = b.v${index}` :
+        `lower(${column}) = b.f${index} AND starts_with(${column}, b.l${index})`;
+    });
   }
 
   private addBinding(
@@ -446,30 +683,48 @@ class DuckDBCottasDocument implements CottasDocument {
    * This is the selection rule used by nested-index triple stores such as rdf-stores.js: an order
    * only helps while its components are bound from the front, because that is the prefix Parquet
    * row-group statistics can prune on. A repeated variable is not a bound term.
+   *
+   * Variables bound by a block of pushed bindings (`blockBound`) count as bound too, but only after
+   * constants: the values of a block are scattered over the whole file, so they prune far fewer row
+   * groups than one constant does.
    */
-  private indexFor(subject: RDF.Term, predicate: RDF.Term, object: RDF.Term): string {
+  private indexFor(
+    subject: RDF.Term,
+    predicate: RDF.Term,
+    object: RDF.Term,
+    blockBound: Set<string> = new Set(),
+  ): string {
     if (this.indexPaths.size === 0) {
       return this.cottasPath;
     }
+    const constants = new Set<string>();
     const bound = new Set<string>();
     for (const [ component, term ] of <[string, RDF.Term][]>[[ 's', subject ], [ 'p', predicate ], [ 'o', object ]]) {
       if (term.termType !== 'Variable') {
+        constants.add(component);
+        bound.add(component);
+      } else if (blockBound.has(term.value)) {
         bound.add(component);
       }
     }
+    const prefixOf = (components: string[], within: Set<string>): number => {
+      let prefix = 0;
+      while (prefix < components.length && within.has(components[prefix])) {
+        prefix++;
+      }
+      return prefix;
+    };
     let best = this.cottasPath;
-    let bestPrefix = -1;
+    let bestScore = -1;
     for (const order of INDEX_ORDERS) {
       const path = this.indexPaths.get(order.name);
       if (!path) {
         continue;
       }
-      let prefix = 0;
-      while (prefix < order.components.length && bound.has(order.components[prefix])) {
-        prefix++;
-      }
-      if (prefix > bestPrefix) {
-        bestPrefix = prefix;
+      const score = prefixOf(order.components, constants) * (order.components.length + 1) +
+        prefixOf(order.components, bound);
+      if (score > bestScore) {
+        bestScore = score;
         best = path;
       }
     }
@@ -555,24 +810,33 @@ class DuckDBCottasDocument implements CottasDocument {
    *
    * Patterns are comma-joined rather than written as explicit JOINs, leaving DuckDB free to choose
    * its own join order. Every alias and column name is generated here; all RDF values reach the
-   * query as bound parameters.
+   * query as bound parameters. The pieces are returned too, so bound joins can extend the query.
    */
-  private joinSql(patterns: ICottasJoinPattern[], options: ICottasGraphOptions): IJoinSql {
+  private joinSql(
+    patterns: ICottasJoinPattern[],
+    options: ICottasGraphOptions,
+    blockBound?: Set<string>,
+  ): IJoinSql {
     const context = this.sqlContext();
-    const froms = patterns.map((pattern, index) => `read_parquet(${
-      context.addValue(this.indexFor(pattern.subject, pattern.predicate, pattern.object))}) AS t${index}`);
+    const froms = patterns.map((pattern, index) => `read_parquet(${context.addValue(
+      this.indexFor(pattern.subject, pattern.predicate, pattern.object, blockBound),
+    )}) AS t${index}`);
     for (const [ index, pattern ] of patterns.entries()) {
       this.addPatternConditions(context, `t${index}`, pattern, options);
     }
 
     const variables = [ ...context.columns.keys() ];
-    // A pattern of nothing but constants still yields one row per match, hence the literal.
-    const select = variables.length === 0 ?
-      '1 AS present' :
-      variables.map((variable, index) => `${context.columns.get(variable)!} AS c${index}`).join(', ');
+    const select = variables.map((variable, index) => `${context.columns.get(variable)!} AS c${index}`).join(', ');
+    const from = froms.join(', ');
     const where = context.conditions.length > 0 ? ` WHERE ${context.conditions.join(' AND ')}` : '';
     return {
-      sql: `SELECT ${select} FROM ${froms.join(', ')}${where}`,
+      // A pattern of nothing but constants still yields one row per match, hence the literal.
+      sql: `SELECT ${select === '' ? '1 AS present' : select} FROM ${from}${where}`,
+      select,
+      from,
+      conditions: context.conditions,
+      columns: context.columns,
+      addValue: context.addValue,
       values: context.values,
       variables,
       impossible: context.impossible,
@@ -602,7 +866,7 @@ export async function openCottasDocument(
   dataFactory: ComunicaDataFactory,
 ): Promise<CottasDocument> {
   const cottasPath = await validateLocalPath(inputPath);
-  const instance = await DuckDBInstance.create(':memory:');
+  const instance = await acquireInstance();
   const connection = await instance.connect();
   try {
     const reader = await connection.runAndReadAll(
@@ -642,10 +906,23 @@ export async function openCottasDocument(
   } catch (error: unknown) {
     // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
     connection.closeSync();
-    // eslint-disable-next-line no-sync -- DuckDB exposes synchronous close methods only.
-    instance.closeSync();
+    releaseInstance(instance);
     throw new Error(`Unable to open COTTAS file '${cottasPath}': ${errorMessage(error)}`);
   }
+}
+
+/** The names of the variables bound by at least one row. */
+function boundVariables(rows: CottasBoundRow[]): Set<string> {
+  return new Set(rows.flatMap(row => [ ...row.keys() ]));
+}
+
+function emptyCursor<T>(): ICottasCursor<T> {
+  return {
+    read: async() => [],
+    close: async() => {
+      // Nothing was opened.
+    },
+  };
 }
 
 async function isReadableFile(candidate: string): Promise<boolean> {

@@ -36,6 +36,8 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
       pageSize?: number;
       /** Whether the default graph is the union of all graphs. */
       unionDefaultGraph?: boolean;
+      /** The time one query against the document takes, in milliseconds, reported in the metadata. */
+      requestTime?: number;
     },
   ) {
     super(options);
@@ -75,6 +77,7 @@ export class CottasIterator extends BufferedIterator<RDF.Bindings> {
           state: new MetadataValidationState(),
           cardinality: { type: hasExactCount ? 'exact' : 'estimate', value: totalCount },
           variables,
+          ...options.requestTime === undefined ? {} : { requestTime: options.requestTime },
         });
       })
       .catch(error => this.destroy(error));

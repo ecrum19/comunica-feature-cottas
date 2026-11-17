@@ -115,6 +115,23 @@ describe('ActorQuerySourceIdentifyCottas', () => {
         expect((<any> ret.querySource.source).pageSize).toBe(8192);
       });
 
+      it('should forward the request time to the source', async() => {
+        const timed = new ActorQuerySourceIdentifyCottas({
+          name: 'actor',
+          bus,
+          httpInvalidator,
+          mediatorMergeBindingsContext,
+          maxBufferSize: 128,
+          pageSize: 8192,
+          requestTime: 10,
+        });
+        const ret = await timed.run({
+          querySourceUnidentified: { type: 'cottas', value: 'path/' },
+          context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
+        });
+        expect((<any> ret.querySource.source).requestTime).toBe(10);
+      });
+
       it('should get the source with context', async() => {
         const contextIn = new ActionContext({ [KeysInitQuery.dataFactory.name]: DF });
         const contextSource = new ActionContext();
